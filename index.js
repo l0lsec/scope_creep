@@ -405,7 +405,7 @@ io.on('connection', function(socket){
   });
 
   socket.on('subdomain_lookup', function(query){
-    http_resolver.get('http://api.hackertarget.com/hostsearch/?q=' + query,  (resp) => {
+    https_resolver.get('https://api.hackertarget.com/hostsearch/?q=' + query,  (resp) => {
       let data = '';
 
       resp.on('data', (chunk) => {
@@ -413,19 +413,22 @@ io.on('connection', function(socket){
       });
 
       resp.on('end', () => {
-        lines = data.split('\n')
+        lines = data.split('\n').filter(l => l.trim().length > 0)
         for(line in lines){
           subdomain = lines[line].split(',')
-          subdomain_name = subdomain[0]
-          subdomain_ip = subdomain[1]
+          subdomain_name = subdomain[0].trim()
+          subdomain_ip = (subdomain[1] || '').trim()
+          if(!subdomain_name) continue
           if(subdomain_name.split('.').length == 2){
-            new_node = JSON.parse('{"id": "'+ subdomain_name + '", "parent": "' + query + '", "node_type": "network"}')
+            new_node = {id: subdomain_name, parent: query, node_type: "network"}
           }else{
-            new_node = JSON.parse('{"id": "'+ subdomain_name + '", "parent": "' + query + '", "node_type": "subdomain"}')
+            new_node = {id: subdomain_name, parent: query, node_type: "subdomain"}
           }
           io.emit('add_node', new_node)
-          new_node = JSON.parse('{"id": "'+ subdomain_ip + '", "parent": "' + subdomain_name + '", "node_type": "server"}')
-          io.emit('add_node', new_node)
+          if(subdomain_ip){
+            new_node = {id: subdomain_ip, parent: subdomain_name, node_type: "server"}
+            io.emit('add_node', new_node)
+          }
         }
       });
 
@@ -441,12 +444,18 @@ io.on('connection', function(socket){
       });
 
       resp.on('end', () => {
-        results = JSON.parse(data).passive_dns
+        try {
+          results = JSON.parse(data).passive_dns
+        } catch(e) {
+          console.log("Error parsing AlienVault response: " + e.message);
+          return;
+        }
+        if(!results || !results.length) return;
         for(i=0;i<results.length;i++){
-          new_node = JSON.parse('{"id": "'+ results[i].hostname + '", "parent": "' + query + '", "node_type": "subdomain"}')
+          new_node = {id: results[i].hostname, parent: query, node_type: "subdomain"}
           io.emit('add_node', new_node)
           if(results[i].address){
-            new_node = JSON.parse('{"id": "'+ results[i].address + '", "parent": "' + results[i].hostname + '", "node_type": "server"}')
+            new_node = {id: results[i].address, parent: results[i].hostname, node_type: "server"}
             io.emit('add_node', new_node)
           }
         }
