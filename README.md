@@ -46,7 +46,9 @@ Usage/Modules
 - You can trigger modules by clicking on them in the help menu. However, it's faster and more fun to learn the key bindings.
 - You can select multiple nodes by either clicking on their row in the stats list or by using the node search.
 - Node search/find(f) supports JavaScript regular expressions (e.g. 'domain.com' will select the domain and its subdomains but '^domain.com' will only select the domain and no subs). [regex reference](https://eloquentjavascript.net/09_regexp.html)
-- Add values for [shodan](https://www.shodan.io/) api key, [whoxy](https://www.whoxy.com/reverse-whois/) api key, [li_at](https://www.linkedin.com/) cookie, and [hunter.io](https://hunter.io/users/sign_up) api key to use those features. The value is saved in a cookie when you click out of the input so that they persist between page reloads.
+- Add values for [shodan](https://www.shodan.io/) api key, [whoxy](https://www.whoxy.com/reverse-whois/) api key, [li_at](https://www.linkedin.com/) cookie, [hunter.io](https://hunter.io/users/sign_up) api key, and [flare.io](https://flare.io/) api key to use those features. The value is saved in a cookie when you click out of the input so that they persist between page reloads.
+- The Flare tenant id field is optional. Leave it blank to use the default tenant on your Flare account, or set it to scope lookups to a specific tenant. Use the "Status" button next to the Flare key to confirm your key/tenant are valid.
+- The toolbar has a few display toggles: switch between the force-directed graph and a tabular **List View**, flip the **theme** between dark and light (🌙/☀️), and cycle **node labels** between off, all, and selected-only (see below). These preferences persist in cookies between reloads.
 - The li_at cookie is LinkedIn's session cookie and required to mine LinkedIn with Scope Creep. I recommend [editthiscookie](http://www.editthiscookie.com/) extension for Chrome to get your current session cookie.
 
 ### Add Node(a):
@@ -58,11 +60,28 @@ Toggles the help window in and out of the screen.
 ### Hide Stats(H):
 Toggles the Stats list in and out of the screen.
 
+### Toggle List View(z):
+Switches between the force-directed graph and a tabular List View of the same data. The List View is handy when the graph gets too dense to read: it groups nodes by type, is searchable/sortable, and lets you jump back to a node in the graph ("Show in Graph"). You can also toggle it with the "List View" button in the toolbar.
+
+### Toggle Theme(🌙/☀️):
+The theme button in the toolbar flips the interface between dark and light. Your choice is saved in a cookie and restored on reload.
+
+### Toggle Labels(🏷️):
+Node labels are hidden by default and only appear when you hover a node (a selected node is always marked with a glowing icon). The "Labels" button in the toolbar cycles a persistent label mode across three states so you can read the graph without hovering every node:
+- **Off** – default hover-only behavior.
+- **All** – pin every node's label visible. Great on small graphs, but busy on large ones.
+- **Selected** – pin labels for the currently selected nodes only. Select the handful of nodes you care about (via click, the stats list, or search) and read just those, without the clutter of everything else.
+
+The chosen mode is saved in a cookie and restored on reload.
+
 ### Connect Nodes(c):
 Select a node, hit 'c', and select another node to connect them. Press 'c' again to cancel if you accidentally hit it.
 
 ### Copy Nodes to Clipboard(y):
 Yank the contents of the selected nodes to your clipboard. Useful for fast export of data like pulling an addresses.txt for phishing.
+
+### Select First Connections(UP Arrow):
+Adds every node directly connected to the current selection to the selection. Press it repeatedly to walk outward through the graph one hop at a time. Great for grabbing everything attached to a domain, host, or organization before running a mass operation.
 
 ### Export Nodes(e):
 Export the contents of the selected nodes to a file name of your choosing. If you include the word 'finding' in the file name, the selected nodes will be exported in the format that Engage expects for finding imports. This is great for turning open port nodes into a finding like "Internet accessible authentication prompts".
@@ -121,6 +140,9 @@ Generates emails from all person nodes in the graph. If you leave the domain bla
 ### Generate Phishmonger Target CSV(G):
 Exports a CSV to the clipboard that contains a social engineering targets list. Useful in combination with the LinkedIn scraper and Hunter.io results.
 
+### Convert IP Range to CIDR Node(C):
+Takes a selected node that names an IP range (e.g. "192.168.0.0-192.168.0.255") and, when the range lines up exactly with a network boundary, spins off a matching CIDR node (e.g. "192.168.0.0/24"). Handy for turning range results into CIDR nodes you can then ping sweep or port scan.
+
 ### View Website in New Tab(v):
 Opens a new Chrome tab for the selected nodes. Great for viewing web portals.
 
@@ -154,8 +176,14 @@ Performs a Shodan query on the selected node. One node at a time limit because S
 ### LinkedIn Search (deactivation risk, DO NOT THREAD!)(l):
 Mines LinkedIn for employee names and positions using a headless Chrome browser that mimics a human scrolling through pages. You need to make sure you have a current li_at cookie set first. You also need to select a node for the results to attach to. Go search for your target org in LinkedIn and get the OrgID and the number of results pages you want to mine. The OrgId for "https://www.linkedin.com/search/results/people/?facetCurrentCompany=11452158" would be 11452158. Sometimes you'll see multiple OrgIds. In those cases, just mine them one after the other. DO NOT TRY TO SPEED UP OR THREAD THIS MODULE!!!!!!!!! YOU CAN GET BUSTED AND ACCOUNT SUSPENDED!!!! It is slow for a reason.
 
-### Email Search (limit 100 queries/month)(M):
-Performs a Hunter.io email search and a SKS-KeyServer email search. Go get a free Hunter.io account and grab the api key. The free API allows 100 results per month but 10 emails is equal to one result. The max emails per query is 100 so that will burn 10 "queries" if you get 100 results. In effect, you are limited to an absolute maximum of 1,000 emails per month with the free account. I recommend exporting and looking through the email sources that it returns. They can point to directories and places to get other emails. They can also give you an idea of other organizations that your target works with. Great for blackbox testing.
+### Email Search (limit 50 queries/month)(M):
+Performs a Hunter.io email search and a SKS-KeyServer email search. Go get a free Hunter.io account and grab the api key. The free API allows a limited number of results per month but 10 emails is equal to one result. The max emails per query is 100 so that will burn 10 "queries" if you get 100 results. I recommend exporting and looking through the email sources that it returns. They can point to directories and places to get other emails. They can also give you an idea of other organizations that your target works with. Great for blackbox testing.
+
+### Flare Leaked Credentials(k):
+Queries the [Flare](https://flare.io/) API for leaked credentials tied to the selected domain/network, subdomain, or email nodes. Results come back as credential nodes (parent : secret) attached to the node you searched, and roll up into the Emails and Credentials tallies in the stats panel. Requires a Flare api key in the settings panel (the tenant id is optional).
+
+### Flare Breach Events(j):
+Queries the Flare API for breach/threat events associated with the selected domain/network, subdomain, or email nodes. Results attach as breach event nodes with friendly labels and metadata (source, date, etc.) that you can read via hover or the List View. Requires a Flare api key in the settings panel (the tenant id is optional).
 
 ### Location Search (general rate limit)(L):
 Tries to find the Lat/Long location associated with an IP. You can view location nodes in Google maps by using the "View Website in New Tab(v)" module.

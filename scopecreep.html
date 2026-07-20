@@ -41,7 +41,13 @@
         paint-order: stroke; stroke: var(--label-halo); stroke-width: 3px; stroke-linejoin: round;
       }
       .node-group:hover text.node { opacity: 1; }
-      text.node.selected { opacity: 1 !important; fill: var(--label-selected) !important; }
+      /* "Show labels" modes (default is hover-only): reveal every label ("all"),
+         or scope the reveal to just the selected nodes ("selected"). */
+      :root[data-labels="all"] text.node { opacity: 1; }
+      :root[data-labels="selected"] text.node.selected { opacity: 1; }
+      /* Selected labels keep their accent color whenever they are visible. The
+         icon glow (below) still marks selection even when the label is hidden. */
+      text.node.selected { fill: var(--label-selected) !important; }
       .node-icon { cursor: pointer; transition: filter .12s ease; }
       .node-group:hover .node-icon { filter: drop-shadow(0 0 3px var(--accent)); }
       text.node.selected + image { filter: drop-shadow(0 0 4px var(--accent)) drop-shadow(0 0 2px var(--accent)); }
@@ -387,6 +393,11 @@
 
           all_connections = {}
 
+          //Node-label visibility modes, cycled by the toolbar button (see #labels_toggle).
+          //Declared up here so the cookie-restore below can call apply_labels_mode().
+          var LABEL_MODES = ['off', 'all', 'selected']
+          var LABEL_MODE_TEXT = {off: '🏷️ Labels Off', all: '🏷️ Labels All', selected: '🏷️ Labels Selected'}
+
           try{
             if($.cookie('shodan_api_key_cookie') !== ""){
               $("#shodan_api_key").val($.cookie('shodan_api_key_cookie'))
@@ -418,6 +429,7 @@
             var saved_theme = $.cookie('theme') || 'dark'
             document.documentElement.setAttribute('data-theme', saved_theme)
             $("#theme_toggle").text(saved_theme === 'dark' ? '☀️' : '🌙')
+            apply_labels_mode($.cookie('labels_mode') || 'off')
           }catch(err){
             console.log("problem setting cookies")
           }
@@ -881,6 +893,25 @@
             document.cookie = 'theme=' + next
             $("#theme_toggle").text(next === 'dark' ? '☀️' : '🌙')
             $("#theme_toggle").trigger("blur")
+          })
+
+          //Node-label visibility has three modes, cycled by the toolbar button:
+          //  off      - hover-only (the default)
+          //  all      - pin every label visible
+          //  selected - pin only the selected nodes' labels
+          //Modes/text are defined near the top of ready() so cookie restore can use them.
+          function apply_labels_mode(mode){
+            if(LABEL_MODES.indexOf(mode) === -1){ mode = 'off' }
+            document.documentElement.setAttribute('data-labels', mode)
+            $("#labels_toggle").text(LABEL_MODE_TEXT[mode])
+          }
+
+          $("#labels_toggle").click(function(){
+            var cur = document.documentElement.getAttribute('data-labels') || 'off'
+            var next = LABEL_MODES[(LABEL_MODES.indexOf(cur) + 1) % LABEL_MODES.length]
+            apply_labels_mode(next)
+            document.cookie = 'labels_mode=' + next
+            $("#labels_toggle").trigger("blur")
           })
 
           $("#hide_settings").click(function(){
@@ -2321,6 +2352,7 @@
 </label><span id="safety_label">"Safety" Mode ON</span>
 <button id="list_view_button" title="Switch to list view (z)" style="margin-left:10px;">☰ List View</button>
 <button id="sessions_button" title="Saved sessions — recover or switch your recon work" style="margin-left:6px;">⧉ Sessions</button>
+<button id="labels_toggle" title="Cycle node labels: off / all / selected only" style="margin-left:6px;">🏷️ Labels Off</button>
 <button id="theme_toggle" title="Toggle light/dark theme" style="margin-left:6px;">🌙</button>
 <input id="search_field" type="text" value="Find Node (f)" style="position:absolute;right:0px;" />
 <div id="settings" style="position:absolute;left:0px;top:30px;">
