@@ -1,5 +1,5 @@
 fs = require('fs');
-glob = require("glob")
+glob = require("glob").glob
 dateFormat = require('dateformat');
 var app = require('express')();
 var http = require('http').Server(app);
@@ -960,7 +960,7 @@ io.on('connection', function(socket){
   });
 
   socket.on('open_file', function(query_object){
-    glob(query_object.file_path, function (er, files) {
+    glob(query_object.file_path).then(function (files) {
       for (var i=0; i<files.length; i++) {
         io.emit('server_message', "Importing File: " + files[i])
         fs.readFile(files[i], function(err,scope_file){
@@ -987,7 +987,7 @@ io.on('connection', function(socket){
 
   socket.on('open_graph', function(graph_path){
     //check if we need to import any graphs
-    glob(graph_path, function (er, files) {
+    glob(graph_path).then(function (files) {
       for (var i=0; i<files.length; i++) {
         io.emit('server_message', "Importing Graph: " + files[i])
         fs.readFile(files[i], function(err,graph_file){
@@ -1034,7 +1034,7 @@ async function linkedinMiner(parent_node, io, linkedin_cookie, org_id, start_pag
 
   let browser = await puppeteer.launch({
     headless: true,
-    ignoreHTTPSErrors: true,
+    acceptInsecureCerts: true,
     ignoreDefaultArgs: ["--enable-automation"],
     defaultViewport: null,
     args: puppet_options
