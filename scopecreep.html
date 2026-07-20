@@ -56,6 +56,46 @@
       }
       #settings span { color: var(--muted); }
 
+      /* ---------- Session queue panel ---------- */
+      #session_panel {
+        display: none; position: absolute; top: 34px; left: 50%;
+        transform: translateX(-50%); z-index: 40; width: 360px;
+        max-height: 76vh; overflow: auto;
+        background: var(--panel); color: var(--fg);
+        border: 1px solid var(--panel-border); border-radius: 10px;
+        box-shadow: 0 6px 22px var(--panel-shadow); padding: 12px 14px;
+        backdrop-filter: blur(6px); font-size: 12px;
+      }
+      #session_panel .sp_head {
+        display: flex; align-items: center; justify-content: space-between;
+        margin-bottom: 10px;
+      }
+      #session_panel .sp_title { font-weight: 700; font-size: 13px; }
+      #session_list { display: flex; flex-direction: column; gap: 6px; }
+      .session_row {
+        display: flex; align-items: center; gap: 8px;
+        padding: 7px 9px; border-radius: 8px; cursor: pointer;
+        border: 1px solid var(--panel-border); background: var(--field-bg);
+        transition: background .12s ease, border-color .12s ease;
+      }
+      .session_row:hover { background: var(--row-hover); }
+      .session_row.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+      .session_row .sr_main { flex: 1; min-width: 0; }
+      .session_row .sr_name {
+        font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .session_row .sr_meta { color: var(--muted); font-size: 11px; margin-top: 1px; }
+      .session_row .sr_badge {
+        color: var(--accent); font-size: 10px; font-weight: 700;
+        text-transform: uppercase; letter-spacing: .04em;
+      }
+      .session_row .sr_actions { display: flex; gap: 4px; flex-shrink: 0; }
+      .session_row .sr_actions button {
+        padding: 2px 6px; font-size: 11px; line-height: 1.4;
+      }
+      #session_panel .sp_empty { color: var(--muted); padding: 6px 2px; }
+      #session_panel .sp_source_server { font-style: italic; }
+
       /* ---------- Form controls ---------- */
       input[type="text"], input[type="password"] {
         background: var(--field-bg); color: var(--fg);
@@ -1379,6 +1419,9 @@
               bind_node_click()
               //if this node was already on screen, push the new label/tooltip to it
               if(node.meta || node.label){ refresh_node_display(node.id) }
+              //metadata arriving on an existing node isn't a structural graph
+              //change, so nudge the session auto-save directly to capture it
+              if(typeof schedule_save === 'function'){ schedule_save() }
             }
           }
 
@@ -1412,6 +1455,334 @@
           socket.on('server_message', function(message){
             alert(message)
           });
+
+          // ================================================================
+          //  Session Persistence & Recovery
+          //  ----------------------------------------------------------------
+          //  Your recon graph lives entirely in memory, so a tab refresh used
+          //  to wipe it. This module continuously auto-saves the working graph
+          //  (nodes, links, connections, and Flare metadata) to localStorage
+          //  for instant refresh recovery, mirrors each save to a file on the
+          //  server as a durable backup, and exposes a queue of past sessions
+          //  you can switch between. localStorage is the source of truth;
+          //  the server copy is the safety net (survives a cache clear).
+          // ================================================================
+          var SS_ACTIVE_KEY = 'scopecreep_active_session';   // id of the live session
+          var SS_INDEX_KEY  = 'scopecreep_session_index';     // [{id,name,createdAt,updatedAt,nodeCount}]
+          var SS_PREFIX     = 'scopecreep_session_';          // + id -> full session JSON
+
+          var active_session_id = null;   // the session auto-save writes to
+          var restoring = false;          // suppress auto-save while rebuilding the graph
+          var save_timer = null;          // debounce handle
+          var server_sessions = {};       // id -> summary, for server-only sessions in the queue
+
+          function ss_new_id(){
+            return 'sess_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+          }
+
+          function ss_default_name(ts){
+            try {
+              return 'Session ' + new Date(ts).toLocaleString([], {
+                month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
+              });
+            } catch(e){ return 'Session ' + ts; }
+          }
+
+          function ss_relative(ts){
+            if(!ts){ return '' }
+            var diff = Date.now() - ts;
+            if(diff < 45000){ return 'just now' }
+            if(diff < 3600000){ return Math.round(diff / 60000) + 'm ago' }
+            if(diff < 86400000){ return Math.round(diff / 3600000) + 'h ago' }
+            try {
+              return new Date(ts).toLocaleString([], {
+                month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
+              });
+            } catch(e){ return '' }
+          }
+
+          function ss_load_index(){
+            try { return JSON.parse(localStorage.getItem(SS_INDEX_KEY)) || [] }
+            catch(e){ return [] }
+          }
+          function ss_save_index(idx){
+            try { localStorage.setItem(SS_INDEX_KEY, JSON.stringify(idx)) }
+            catch(e){ console.log('session index save failed', e) }
+          }
+          function ss_load_full(id){
+            try { return JSON.parse(localStorage.getItem(SS_PREFIX + id)) }
+            catch(e){ return null }
+          }
+
+          // Snapshot the live graph into a plain, serializable object. Mirrors
+          // the shape used by Export Graph (E) but also carries Flare metadata.
+          function ss_serialize(){
+            var nodes = [], links = [];
+            mygraph.forEachNode(function(n){ nodes.push({ id: n.id, type: n.data }); });
+            mygraph.forEachLink(function(l){ links.push({ from: l.fromId, to: l.toId }); });
+            return { nodes: nodes, links: links, meta: node_meta, labels: node_labels };
+          }
+
+          // Debounced trigger — safe to call on every tiny graph change.
+          function schedule_save(){
+            if(restoring || !active_session_id){ return }
+            clearTimeout(save_timer);
+            save_timer = setTimeout(save_current_session, 800);
+          }
+
+          function save_current_session(){
+            if(!active_session_id){ return }
+            var snap = ss_serialize();
+            var idx = ss_load_index();
+            var entry = null;
+            for(var i = 0; i < idx.length; i++){ if(idx[i].id === active_session_id){ entry = idx[i]; break } }
+            var now = Date.now();
+            var createdAt = entry ? entry.createdAt : now;
+            var name = entry ? entry.name : ss_default_name(now);
+            var session = {
+              id: active_session_id, name: name,
+              createdAt: createdAt, updatedAt: now,
+              nodes: snap.nodes, links: snap.links, meta: snap.meta, labels: snap.labels
+            };
+            try {
+              localStorage.setItem(SS_PREFIX + active_session_id, JSON.stringify(session));
+              localStorage.setItem(SS_ACTIVE_KEY, active_session_id);
+              var summary = { id: active_session_id, name: name, createdAt: createdAt,
+                              updatedAt: now, nodeCount: snap.nodes.length };
+              var rebuilt = idx.filter(function(e){ return e.id !== active_session_id });
+              rebuilt.push(summary);
+              ss_save_index(rebuilt);
+            } catch(err){
+              // Most likely a localStorage quota error on a very large graph.
+              // The server mirror below still captures the work.
+              console.log('session save to localStorage failed (quota?)', err);
+            }
+            socket.emit('save_session', session);   // durable server backup
+            render_session_list();
+          }
+
+          // Tear the live graph down to empty. Removing a node also drops its
+          // links, so this fully clears nodes, links, connections and metadata.
+          function ss_clear_graph(){
+            var ids = [];
+            mygraph.forEachNode(function(n){ ids.push(n.id); });
+            mygraph.beginUpdate();
+            ids.forEach(function(id){ mygraph.removeNode(id); });
+            mygraph.endUpdate();
+            all_connections = {};
+            node_meta = {};
+            node_labels = {};
+          }
+
+          // Rebuild the live graph from a saved session object.
+          function ss_restore_graph(session){
+            restoring = true;
+            ss_clear_graph();
+            node_meta   = session.meta   || {};
+            node_labels = session.labels || {};
+            (session.nodes || []).forEach(function(n){
+              if(typeof mygraph.getNode(n.id) === 'undefined'){
+                mygraph.addNode(n.id, n.type);
+                if(typeof all_connections[n.id] === 'undefined'){ all_connections[n.id] = {}; }
+              }
+            });
+            (session.links || []).forEach(function(l){
+              var a = mygraph.getNode(l.from), b = mygraph.getNode(l.to);
+              if(a && b && mygraph.getLink(l.from, l.to) == null && mygraph.getLink(l.to, l.from) == null){
+                mygraph.addLink(l.from, l.to);
+                all_connections[l.from][l.to] = b.data;
+                all_connections[l.to][l.from] = a.data;
+              }
+            });
+            bind_node_click();
+            if(typeof refresh_list === 'function'){ try { refresh_list(true) } catch(e){} }
+            restoring = false;
+          }
+
+          function set_active_session(id){
+            active_session_id = id;
+            try { localStorage.setItem(SS_ACTIVE_KEY, id) } catch(e){}
+          }
+
+          // Start a brand-new, empty session (saving the current one first).
+          function new_session(){
+            if(active_session_id){ save_current_session(); }
+            restoring = true;
+            ss_clear_graph();
+            restoring = false;
+            var id = ss_new_id();
+            var now = Date.now();
+            var idx = ss_load_index();
+            idx.push({ id: id, name: ss_default_name(now), createdAt: now, updatedAt: now, nodeCount: 0 });
+            ss_save_index(idx);
+            set_active_session(id);
+            save_current_session();
+          }
+
+          // Switch to another session. Local sessions restore instantly; a
+          // server-only session (not in this browser) is fetched over the socket.
+          function switch_session(id){
+            if(id === active_session_id){ return }
+            if(active_session_id){ save_current_session(); }
+            var full = ss_load_full(id);
+            if(full){
+              ss_restore_graph(full);
+              set_active_session(id);
+              render_session_list();
+            } else {
+              // not cached locally — ask the server for it
+              socket.emit('load_session', { id: id });
+            }
+          }
+
+          function rename_session(id){
+            var idx = ss_load_index();
+            var entry = null;
+            for(var i = 0; i < idx.length; i++){ if(idx[i].id === id){ entry = idx[i]; break } }
+            var current = entry ? entry.name : (server_sessions[id] ? server_sessions[id].name : '');
+            var name = prompt('Rename session:', current);
+            if(name == null || name === ''){ return }
+            var full = ss_load_full(id);
+            if(full){ full.name = name; try { localStorage.setItem(SS_PREFIX + id, JSON.stringify(full)) } catch(e){} }
+            if(entry){ entry.name = name; ss_save_index(idx); }
+            if(server_sessions[id]){ server_sessions[id].name = name; }
+            // push the rename to the server backup (only when we hold the full
+            // session locally; a server-only session persists its new name once
+            // it's opened, which caches it here)
+            if(full){ socket.emit('save_session', full); }
+            render_session_list();
+          }
+
+          function delete_session(id){
+            var idx = ss_load_index();
+            var entry = null;
+            for(var i = 0; i < idx.length; i++){ if(idx[i].id === id){ entry = idx[i]; break } }
+            var label = entry ? entry.name : (server_sessions[id] ? server_sessions[id].name : id);
+            if(!confirm('Delete session "' + label + '"? This removes it from this browser and the server backup.')){ return }
+            try { localStorage.removeItem(SS_PREFIX + id) } catch(e){}
+            ss_save_index(idx.filter(function(e){ return e.id !== id }));
+            delete server_sessions[id];
+            socket.emit('delete_session', { id: id });
+            if(id === active_session_id){
+              // fall back to the most recently updated remaining session, or a fresh one
+              var remaining = ss_load_index().sort(function(a, b){ return b.updatedAt - a.updatedAt });
+              if(remaining.length){
+                active_session_id = null;
+                switch_session(remaining[0].id);
+              } else {
+                active_session_id = null;
+                new_session();
+              }
+            } else {
+              render_session_list();
+            }
+          }
+
+          // Build the merged queue: local sessions (full, restore instantly)
+          // plus any server-only sessions (badged, fetched on click).
+          function render_session_list(){
+            var $list = $('#session_list');
+            if(!$list.length){ return }
+            var local = ss_load_index();
+            var seen = {};
+            var rows = [];
+            local.forEach(function(e){ seen[e.id] = true; rows.push({ e: e, server: false }); });
+            Object.keys(server_sessions).forEach(function(id){
+              if(!seen[id]){ rows.push({ e: server_sessions[id], server: true }); }
+            });
+            rows.sort(function(a, b){ return (b.e.updatedAt || 0) - (a.e.updatedAt || 0); });
+
+            $list.empty();
+            if(!rows.length){
+              $list.append($('<div class="sp_empty">No saved sessions yet.</div>'));
+              return;
+            }
+            rows.forEach(function(row){
+              var e = row.e;
+              var $row = $('<div class="session_row"></div>').attr('data-id', e.id);
+              if(e.id === active_session_id){ $row.addClass('active'); }
+
+              var $main = $('<div class="sr_main"></div>');
+              $main.append($('<div class="sr_name"></div>').text(e.name || 'Untitled'));
+              var metaBits = [];
+              metaBits.push(((e.nodeCount || 0)) + ' node' + (e.nodeCount === 1 ? '' : 's'));
+              metaBits.push(ss_relative(e.updatedAt));
+              var $meta = $('<div class="sr_meta"></div>').text(metaBits.join(' · '));
+              if(row.server){ $meta.append($('<span class="sp_source_server"> · backup</span>')); }
+              $main.append($meta);
+              if(e.id === active_session_id){ $main.append($('<span class="sr_badge">Active</span>')); }
+              $row.append($main);
+
+              var $actions = $('<div class="sr_actions"></div>');
+              var $rename = $('<button title="Rename">✎</button>');
+              $rename.on('click', function(ev){ ev.stopPropagation(); rename_session(e.id); });
+              var $del = $('<button title="Delete">🗑</button>');
+              $del.on('click', function(ev){ ev.stopPropagation(); delete_session(e.id); });
+              $actions.append($rename).append($del);
+              $row.append($actions);
+
+              $row.on('click', function(){ switch_session(e.id); });
+              $list.append($row);
+            });
+          }
+
+          // Server responses ------------------------------------------------
+          socket.on('sessions_list', function(list){
+            server_sessions = {};
+            (list || []).forEach(function(s){ if(s && s.id){ server_sessions[s.id] = s; } });
+            render_session_list();
+          });
+
+          socket.on('session_data', function(session){
+            if(!session || !session.id){ return }
+            // cache the fetched server session locally, then make it active
+            try {
+              localStorage.setItem(SS_PREFIX + session.id, JSON.stringify(session));
+              var idx = ss_load_index().filter(function(e){ return e.id !== session.id });
+              idx.push({ id: session.id, name: session.name, createdAt: session.createdAt,
+                         updatedAt: session.updatedAt, nodeCount: (session.nodes || []).length });
+              ss_save_index(idx);
+            } catch(e){ console.log('caching fetched session failed', e); }
+            ss_restore_graph(session);
+            set_active_session(session.id);
+            render_session_list();
+          });
+
+          // Panel toggle ----------------------------------------------------
+          function toggle_session_panel(){ $('#session_panel').toggle(); render_session_list(); }
+          $('#sessions_button').on('click', toggle_session_panel);
+          $('#toggle_sessions').on('click', toggle_session_panel);
+          $('#new_session_button').on('click', function(){ new_session(); });
+
+          // Boot ------------------------------------------------------------
+          // Wait for the graph (created by <body onload=...>) before restoring.
+          function init_sessions(){
+            var last = null;
+            try { last = localStorage.getItem(SS_ACTIVE_KEY) } catch(e){}
+            var full = last ? ss_load_full(last) : null;
+            if(full){
+              ss_restore_graph(full);
+              active_session_id = last;
+            } else {
+              // no recoverable session — pick the newest local one or start fresh
+              var idx = ss_load_index().sort(function(a, b){ return b.updatedAt - a.updatedAt });
+              if(idx.length && ss_load_full(idx[0].id)){
+                ss_restore_graph(ss_load_full(idx[0].id));
+                set_active_session(idx[0].id);
+              } else {
+                new_session();
+              }
+            }
+            // auto-save on every structural change to the graph
+            mygraph.on('changed', function(){ schedule_save(); });
+            render_session_list();
+            socket.emit('list_sessions');   // surface server-only sessions in the queue
+          }
+
+          (function wait_for_graph(){
+            if(typeof mygraph !== 'undefined' && mygraph){ init_sessions(); }
+            else { setTimeout(wait_for_graph, 30); }
+          })();
 
           $("#web_ports").click(function(){
             $("#port_list").val('80,280,443,500,591,593,832,981,2000,2480,3000,4000,4444,4445,4567,5000,5104,5800,5985,5986,6000,7000,7002,8000,8001,8002,8008,8042,8080,8088,8222,8243,8280,8281,8443,8448,8530,8531,8887,8888,9000,9001,9443,9981,10000,11000,11371,12000,12043,12046,12443,13000,16080,18091,18092')
@@ -1949,6 +2320,7 @@
   <span class="slider round"></span>
 </label><span id="safety_label">"Safety" Mode ON</span>
 <button id="list_view_button" title="Switch to list view (z)" style="margin-left:10px;">☰ List View</button>
+<button id="sessions_button" title="Saved sessions — recover or switch your recon work" style="margin-left:6px;">⧉ Sessions</button>
 <button id="theme_toggle" title="Toggle light/dark theme" style="margin-left:6px;">🌙</button>
 <input id="search_field" type="text" value="Find Node (f)" style="position:absolute;right:0px;" />
 <div id="settings" style="position:absolute;left:0px;top:30px;">
@@ -1966,6 +2338,7 @@
   <table id="options_table">
     <tr class="control benign" id="hide_settings"><td>Hide Settings</td><td>(h)(H)</td></tr>
     <tr ><td><b>Graph Operations:</b></td><td></td></tr>
+    <tr class="control benign" id="toggle_sessions"><td>Sessions (auto-saved, recoverable)</td><td>(⧉)</td></tr>
     <tr class="control benign" id="toggle_list_view"><td>Toggle List View</td><td>(z)</td></tr>
     <tr class="control benign" id="connect_nodes"><td>Connect Nodes</td><td>(c)</td></tr>
     <tr class="control benign" id="copy_node_content"><td>Copy Nodes to Clipboard</td><td>(y)</td></tr>
@@ -2005,6 +2378,13 @@
     <tr class="control warning" id="bruteforce_subdomains"><td>Bruteforce Subdomains (interacts with client servers)</td><td>(b)</td></tr>
     <tr class="control warning" id="port_scan"><td>Port Scan/Port Scan ALL IPs</td><td>(p)(P)</td></tr>
   </table>
+</div>
+<div id="session_panel">
+  <div class="sp_head">
+    <span class="sp_title">Sessions</span>
+    <button id="new_session_button" title="Start a fresh session">＋ New Session</button>
+  </div>
+  <div id="session_list"></div>
 </div>
 <table id="stats_table" style="position:absolute;right:5px;top:30px;">
   <tr class="stat">
