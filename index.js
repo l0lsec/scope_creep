@@ -17,6 +17,35 @@ const puppeteer = require('puppeteer');
 evilscan = require('evilscan');
 //ping sweeps
 var ping = require('ping');
+var path = require('path');
+
+// ---------------------------------------------------------------------------
+// Session persistence: durable, file-based mirror of the browser's live
+// recon session. The browser (localStorage) is the source of truth for
+// instant refresh recovery; these files are the backup that survives a
+// browser-cache clear or lets you pick a session up on another machine.
+// ---------------------------------------------------------------------------
+var SESSIONS_DIR = path.join(__dirname, 'sessions');
+try {
+  fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+} catch (err) {
+  console.log('could not create sessions directory: ' + err);
+}
+
+// Session ids come from the browser and are used to build file paths, so
+// keep them to a safe, traversal-proof character set before touching disk.
+function safe_session_id(id) {
+  if (typeof id !== 'string') { return null; }
+  var cleaned = id.replace(/[^A-Za-z0-9_-]/g, '');
+  if (cleaned === '' || cleaned.length > 128) { return null; }
+  return cleaned;
+}
+
+function session_file(id) {
+  var safe = safe_session_id(id);
+  if (!safe) { return null; }
+  return path.join(SESSIONS_DIR, safe + '.json');
+}
 
 app.get('/', function(req, res){
   res.sendFile(__dirname + '/scopecreep.html');
@@ -1268,6 +1297,74 @@ io.on('connection', function(socket){
         });
       }
     })
+  });
+
+  // --- Session persistence handlers ----------------------------------------
+  // Mirror the browser's auto-saved session to disk so it survives a cache
+  // clear. Fired continuously (debounced client-side), so this stays quiet.
+  socket.on('save_session', function(session){
+    if(!session || typeof session !== 'object'){ return }
+    var file = session_file(session.id);
+    if(!file){ return }
+    fs.writeFile(file, JSON.stringify(session), function(err){
+      if(err){ console.log('save_session failed: ' + err) }
+    });
+  });
+
+  // List every backed-up session (lightweight summaries) so the browser can
+  // surface server-only sessions in the queue after localStorage is wiped.
+  socket.on('list_sessions', function(){
+    fs.readdir(SESSIONS_DIR, function(err, files){
+      if(err){ socket.emit('sessions_list', []); return }
+      var summaries = [];
+      var pending = files.filter(function(f){ return f.slice(-5) === '.json' });
+      if(pending.length === 0){ socket.emit('sessions_list', []); return }
+      var remaining = pending.length;
+      pending.forEach(function(f){
+        fs.readFile(path.join(SESSIONS_DIR, f), function(rerr, data){
+          if(!rerr){
+            try {
+              var s = JSON.parse(data);
+              summaries.push({
+                id: s.id,
+                name: s.name,
+                createdAt: s.createdAt,
+                updatedAt: s.updatedAt,
+                nodeCount: (s.nodes || []).length
+              });
+            } catch(pe){ /* skip corrupt file */ }
+          }
+          remaining -= 1;
+          if(remaining === 0){ socket.emit('sessions_list', summaries) }
+        });
+      });
+    });
+  });
+
+  // Send back a full session for the browser to restore (used when the
+  // session exists on the server but not in this browser's localStorage).
+  socket.on('load_session', function(query){
+    var id = query && query.id;
+    var file = session_file(id);
+    if(!file){ return }
+    fs.readFile(file, function(err, data){
+      if(err){ socket.emit('server_message', 'Could not load session: ' + id); return }
+      try {
+        socket.emit('session_data', JSON.parse(data));
+      } catch(pe){
+        socket.emit('server_message', 'Session file was corrupt: ' + id);
+      }
+    });
+  });
+
+  // Remove a backed-up session file when the user deletes it from the queue.
+  socket.on('delete_session', function(query){
+    var id = query && query.id;
+    var file = session_file(id);
+    if(!file){ return }
+    fs.unlink(file, function(err){
+      if(err && err.code !== 'ENOENT'){ console.log('delete_session failed: ' + err) }
+    });
   });
 
 });

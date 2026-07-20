@@ -23,6 +23,21 @@ Getting Started
 node index.js
 ```
 
+Session Persistence & Recovery
+=====
+
+Your recon graph used to live only in the browser tab, so a refresh (or a crash) wiped everything and you had to rebuild from scratch. Scope Creep now auto-saves your working graph as you go and lets you jump between past sessions.
+
+- **Auto-save:** every change to the graph — adding nodes, running lookups, connecting, deleting, and any Flare metadata that lands on a node — is saved automatically in the background (debounced, so mass enumeration doesn't thrash). There's nothing to click.
+- **Refresh recovery:** reload the tab (or reopen it later) and your last session is restored instantly — nodes, links, connections, labels, and Flare breach metadata all come back exactly as they were.
+- **Session queue:** click the **⧉ Sessions** button in the top bar (or the "Sessions" row in the help menu) to open the queue. From there you can:
+  - **＋ New Session** — start a fresh, empty graph (your current session is saved first).
+  - **Switch** — click any session to load it back.
+  - **✎ Rename** / **🗑 Delete** — manage your list.
+- **Where it's stored:** the browser's `localStorage` is the live source of truth (that's what makes refresh recovery instant). Every save is also mirrored to a file under `sessions/` on the server as a durable backup. If you clear your browser data or open Scope Creep on another machine, those server backups show up in the queue tagged `backup` — click one to pull it back down. The `sessions/` directory is created automatically on server start and is git-ignored.
+
+This is separate from **Export Graph (E)** / **Open Graph (O)**, which remain the way to save a named graph to a file you choose or share with someone else.
+
 Usage/Modules
 =====
 
