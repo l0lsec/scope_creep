@@ -161,6 +161,9 @@
             if($.cookie('whoxy_api_key_cookie') !== ""){
               $("#whoxy_api_key").val($.cookie('whoxy_api_key_cookie'))
             }
+            if($.cookie('flare_api_key_cookie') !== ""){
+              $("#flare_api_key").val($.cookie('flare_api_key_cookie'))
+            }
             if($.cookie('port_list') !== ""){
               $("#port_list").val($.cookie('port_list'))
             }
@@ -223,6 +226,10 @@
 
           $("#whoxy_api_key").focusout(function(){
             document.cookie = "whoxy_api_key_cookie=" + $("#whoxy_api_key").val()
+          })
+
+          $("#flare_api_key").focusout(function(){
+            document.cookie = "flare_api_key_cookie=" + $("#flare_api_key").val()
           })
 
           $("#port_list").focusout(function(){
@@ -435,6 +442,14 @@
               //email search with 'M' key
               if (e.keyCode==77){
                 $("#email_search").click()
+              }
+              //Flare leaked-credential lookup with 'k' key
+              if (e.keyCode==107){
+                $("#flare_credentials").click()
+              }
+              //Flare threat-event lookup with 'j' key
+              if (e.keyCode==106){
+                $("#flare_events").click()
               }
               //Location search with 'L' key
               if (e.keyCode==76){
@@ -881,6 +896,43 @@
             socket.emit('whoxy_api_check', whoxy_api_key)
           })
 
+          $("#flare_api_check").click(function(){
+            flare_api_key = $("#flare_api_key").val()
+            socket.emit('flare_api_check', flare_api_key)
+          })
+
+          $("#flare_credentials").click(function(){
+            selected = $(".selected").each(function(index){
+              node_type = mygraph.getNode(this.id).data
+              if(node_type.match(/^(network|subdomain|email)$/)){
+                query_object = {}
+                query_object.node_id = this.id
+                query_object.node_type = node_type
+                query_object.flare_api_key = $("#flare_api_key").val()
+                socket.emit('flare_credentials', query_object)
+              }else{
+                alert("Flare lookup must be performed on a domain or email node.")
+              }
+            });
+            $("#flare_credentials").trigger("blur")
+          })
+
+          $("#flare_events").click(function(){
+            selected = $(".selected").each(function(index){
+              node_type = mygraph.getNode(this.id).data
+              if(node_type.match(/^(network|subdomain|email)$/)){
+                query_object = {}
+                query_object.node_id = this.id
+                query_object.node_type = node_type
+                query_object.flare_api_key = $("#flare_api_key").val()
+                socket.emit('flare_events', query_object)
+              }else{
+                alert("Flare lookup must be performed on a domain or email node.")
+              }
+            });
+            $("#flare_events").trigger("blur")
+          })
+
           $("#generate_emails").click(function(){
             email_format = prompt("Please select an email format:\na) john.smith (default)\nb) jsmith\nc) johns\nd) john\ne) j.smith\nf) john.s\ng) smithj","")
             if(email_format == null){return;}
@@ -1007,7 +1059,7 @@
           })
 
           get_stats = function(){
-            stats = {"cidr": 0, "email": 0, "info": 0, "linkedin": 0, "mail": 0, "nameserver": 0, "network": 0, "organization": 0, "person": 0, "port": 0, "position": 0, "server": 0, "subdomain": 0, "txt": 0, "location": 0, "phone": 0}
+            stats = {"cidr": 0, "email": 0, "info": 0, "linkedin": 0, "mail": 0, "nameserver": 0, "network": 0, "organization": 0, "person": 0, "port": 0, "position": 0, "server": 0, "subdomain": 0, "txt": 0, "location": 0, "phone": 0, "credential": 0, "event": 0}
             mygraph.forEachNode(function(node){
               stats[node.data] += 1
             })
@@ -1149,6 +1201,8 @@
   <span>hunter.io key:</span><input id="hunter_api_key" type="password" value="Hunter.io api key here" /><button id="hunter_api_check">Status</button>
   <br>
   <span>Whoxy key:</span><input id="whoxy_api_key" type="password" value="Whoxy.com api key here" /><button id="whoxy_api_check">Status</button>
+  <br>
+  <span>Flare key:</span><input id="flare_api_key" type="password" value="Flare.io api key here" /><button id="flare_api_check">Status</button>
   <table id="options_table">
     <tr class="control benign" id="hide_settings"><td>Hide Settings</td><td>(h)(H)</td></tr>
     <tr ><td><b>Graph Operations:</b></td><td></td></tr>
@@ -1183,6 +1237,8 @@
     <tr class="control ratelimit" id="query_shodan"><td>Query Shodan (rate limit 1 per second)</td><td>(q)</td></tr>
     <tr class="control ratelimit" id="linkedin_search"><td>LinkedIn Search (deactivation risk, DO NOT THREAD!)</td><td>(l)</td></tr>
     <tr class="control ratelimit" id="email_search"><td>Email Search (limit 50 queries/month)</td><td>(M)</td></tr>
+    <tr class="control ratelimit" id="flare_credentials"><td>Flare Leaked Credentials (domain/email node)</td><td>(k)</td></tr>
+    <tr class="control ratelimit" id="flare_events"><td>Flare Breach Events (domain/email node)</td><td>(j)</td></tr>
     <tr class="control ratelimit" id="location_search"><td>Location Search (general rate limit)</td><td>(L)</td></tr>
     <tr class="control ratelimit" id="zone_transfer"><td>DNS Zone Transfer</td><td>(Z)</td></tr>
     <tr class="control warning" id="bruteforce_subdomains"><td>Bruteforce Subdomains (interacts with client servers)</td><td>(b)</td></tr>
@@ -1237,6 +1293,14 @@
   <tr class="stat">
     <td><image width="15" height="15" src="/images/email"></image>  Emails:</td>
     <td id="email_tally">0</td>
+  </tr>
+  <tr class="stat">
+    <td><image width="15" height="15" src="/images/credential"></image>  Credentials:</td>
+    <td id="credential_tally">0</td>
+  </tr>
+  <tr class="stat">
+    <td><image width="15" height="15" src="/images/event"></image>  Breach Events:</td>
+    <td id="event_tally">0</td>
   </tr>
   <tr class="stat">
     <td><image width="15" height="15" src="/images/txt"></image>  Text Records:</td>
