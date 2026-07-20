@@ -232,12 +232,46 @@
       .conn_row.gone:hover { background: none; }
       #detail_trail { color: var(--muted); margin-bottom: 8px; word-break: break-all; }
       #detail_trail span { cursor: pointer; text-decoration: underline; }
+      #detail_rawid { color: var(--muted); font-variant-numeric: tabular-nums; margin: -2px 0 6px; word-break: break-all; }
+      .meta_table { border-collapse: collapse; width: 100%; margin: 2px 0 4px; }
+      .meta_table td { padding: 3px 6px; border-bottom: 1px solid var(--panel-border); vertical-align: top; }
+      .meta_table td.meta_k { color: var(--muted); white-space: nowrap; width: 1%; padding-right: 12px; }
+      .meta_table td.meta_v { word-break: break-word; }
     </style>
     <script type="text/javascript">
         link_switch = false;
-        // Display label for a node: credential nodes show just the secret (their identity
-        // is already the parent node); every other type shows its full id.
+        // Extra per-node data that rides along with Flare lookups. Kept at top level
+        // (like the graph itself) so both the node builder in main() and the handlers
+        // inside document.ready share the same store. Reset on every page load.
+        node_meta = {};    // id -> { field: value } metadata for the detail pane + tooltip
+        node_labels = {};  // id -> friendly display label (e.g. readable breach events)
+
+        // Preferred ordering for metadata rows; anything else falls in alphabetically.
+        function ordered_meta_keys(meta){
+          var pref = ['source','source.name','type','event_type','name','title','actor',
+                      'domain','hash_type','plaintext','leaked_at','imported_at',
+                      'created_at','timestamp','risk_score','severity'];
+          var head = pref.filter(function(k){ return meta[k] !== undefined; });
+          var tail = Object.keys(meta).filter(function(k){ return pref.indexOf(k) === -1; }).sort();
+          return head.concat(tail);
+        }
+
+        // Multi-line summary used for the SVG hover tooltip on a graph node.
+        function meta_summary(node_id){
+          var meta = node_meta[node_id];
+          var lines = [];
+          if(node_labels[node_id]){ lines.push(node_labels[node_id]); }
+          if(meta){
+            ordered_meta_keys(meta).forEach(function(k){ lines.push(k + ': ' + meta[k]); });
+          }
+          return lines.join('\n');
+        }
+
+        // Display label for a node: a friendly Flare label wins when present; credential
+        // nodes show just the secret (their identity is already the parent node); every
+        // other type shows its full id.
         function label_for(node){
+          if(node_labels[node.id]){ return node_labels[node.id]; }
           if(node.data === 'credential'){
             var sep = node.id.indexOf(' : ');
             return sep === -1 ? node.id : node.id.slice(sep + 3);
@@ -271,6 +305,10 @@
                      .attr('width', nodeSize)
                      .attr('height', nodeSize)
                      .link('./images/' + node.data);
+              // Native hover tooltip carrying any Flare metadata for this node. Empty
+              // for plain nodes; populated at creation and refreshed as metadata lands.
+              var svgTitle = Viva.Graph.svg('title').text(meta_summary(node.id));
+              img.append(svgTitle);
               ui.append(svgText);
               ui.append(img);
               return ui;
@@ -1292,6 +1330,24 @@
             }
           })
 
+          //Update an already-rendered graph node's label + tooltip after its Flare
+          //metadata arrives (new nodes pick both up at creation via label_for/meta_summary).
+          function refresh_node_display(node_id){
+            var textEl = document.getElementById(node_id)
+            if(!textEl || textEl.tagName !== 'text'){ return }
+            if(node_labels[node_id]){ textEl.textContent = node_labels[node_id] }
+            var group = textEl.parentNode
+            if(!group){ return }
+            var img = group.getElementsByTagName('image')[0]
+            if(!img){ return }
+            var title = img.getElementsByTagName('title')[0]
+            if(!title){
+              title = document.createElementNS('http://www.w3.org/2000/svg', 'title')
+              img.appendChild(title)
+            }
+            title.textContent = meta_summary(node_id)
+          }
+
           add_node = function(node){
             //hack a way to avoid undefined nodes
             var regex1 = RegExp('undefined*');
@@ -1299,6 +1355,10 @@
               if(node.id == ""){
                 return;
               }
+              //stash any Flare metadata / friendly label that rode along with this node.
+              //stored before the graph builds the node so label_for/meta_summary see it.
+              if(node.meta){ node_meta[node.id] = node.meta }
+              if(node.label){ node_labels[node.id] = node.label }
               //only add node if it doesn't exist
               if((typeof mygraph.getNode(node.id)) == 'undefined'){
                 new_node = mygraph.addNode(node.id, node.node_type)
@@ -1314,6 +1374,8 @@
                 all_connections[node.id][node.parent] = mygraph.getNode(node.parent).data
               }
               bind_node_click()
+              //if this node was already on screen, push the new label/tooltip to it
+              if(node.meta || node.label){ refresh_node_display(node.id) }
             }
           }
 
@@ -1486,7 +1548,10 @@
             var rows = []
             mygraph.forEachNode(function(node){
               if(filter_by_type && !list_state.types[node.data]){ return }
-              if(regex && !regex.test(node.id)){ return }
+              //match against the id, the friendly label, and any metadata values
+              //so you can filter by breach source or a readable event name too
+              if(regex && !regex.test(node.id) && !regex.test(display_name(node.id)) &&
+                 !regex.test(meta_summary(node.id))){ return }
               var neighbors = live_neighbors(node.id)
               var counts = {}
               $.each(neighbors, function(index, neighbor){
@@ -1606,8 +1671,10 @@
               html += '</div>'
             }
 
+            var friendly = node_labels[node_id]
             html += '<div id="detail_head">' + type_icon(node.data, 22) +
-                    '<div id="detail_title">' + esc(node_id) + '</div></div>' +
+                    '<div id="detail_title">' + esc(friendly || node_id) + '</div></div>' +
+                    (friendly ? '<div id="detail_rawid">' + esc(node_id) + '</div>' : '') +
                     '<div id="detail_sub">' + esc(type_label(node.data)) + ' / ' + live.length +
                     ' connection' + (live.length === 1 ? '' : 's') +
                     (gone.length ? ' / ' + gone.length + ' deleted' : '') + '</div>' +
@@ -1615,6 +1682,17 @@
                     '<button id="detail_select_conns">Select + Connections</button>' +
                     '<button id="detail_show_graph">Show in Graph</button>' +
                     '<button id="detail_copy">Copy ID</button></div>'
+
+            //Flare (or other) metadata attached to this node
+            var meta = node_meta[node_id]
+            if(meta && Object.keys(meta).length){
+              html += '<div class="detail_group_head">Flare details</div><table class="meta_table">'
+              $.each(ordered_meta_keys(meta), function(index, key){
+                html += '<tr><td class="meta_k">' + esc(key) + '</td>' +
+                        '<td class="meta_v">' + esc(meta[key]) + '</td></tr>'
+              })
+              html += '</table>'
+            }
 
             var grouped = {}
             $.each(live, function(index, neighbor){

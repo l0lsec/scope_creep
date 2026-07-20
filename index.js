@@ -201,6 +201,67 @@ function flareQueryForNode(nodeId, nodeType){
   return { type: 'domain', fqdn: nodeId }; // network / subdomain
 }
 
+// Flatten a Flare record into a compact { key: value } map for the UI. Keeps
+// top-level scalars plus one level into nested objects, and drops noise / huge /
+// secret-duplicating fields. Bounded in field count and value length so a fat
+// stealer-log record can't bloat the graph payload. Schema-agnostic on purpose:
+// whatever fields a record actually carries get passed through.
+function flareMeta(rec){
+  var meta = {};
+  var SKIP = { hash: 1, password: 1, passwords: 1, cookies: 1, cookie: 1, _score: 1,
+               score: 1, id: 1, uid: 1, banner: 1, raw: 1, html: 1, screenshot: 1 };
+  var count = 0;
+  function add(key, val){
+    if(count >= 24 || val === null || val === undefined){ return; }
+    if(typeof val === 'boolean'){ val = val ? 'yes' : 'no'; }
+    var s = String(val).trim();
+    if(s === '' || s === '[object Object]'){ return; }
+    if(s.length > 300){ s = s.slice(0, 300) + '…'; }
+    if(meta[key] === undefined){ meta[key] = s; count++; }
+  }
+  Object.keys(rec || {}).forEach(function(k){
+    if(SKIP[k]){ return; }
+    var v = rec[k];
+    if(Array.isArray(v)){
+      add(k, v.filter(function(x){ return x && typeof x !== 'object'; }).join(', '));
+    } else if(v && typeof v === 'object'){
+      Object.keys(v).forEach(function(k2){
+        if(!SKIP[k2] && v[k2] && typeof v[k2] !== 'object'){ add(k + '.' + k2, v[k2]); }
+      });
+    } else {
+      add(k, v);
+    }
+  });
+  return meta;
+}
+
+// Best-effort human label for a breach event (its uid is opaque). Returns null
+// when none of the expected fields are present, so callers fall back to the uid.
+function flareEventLabel(ev){
+  ev = ev || {};
+  var src = ev.source;
+  var srcName = (src && typeof src === 'object') ? src.name : src;
+  var type = ev.type || (src && typeof src === 'object' && src.type) || (ev.metadata && ev.metadata.type);
+  var name = ev.name || srcName || ev.title || ev.actor;
+  var date = ev.created_at || ev.timestamp || ev.imported_at || ev.leaked_at;
+  if(date){ date = String(date).slice(0, 10); }
+  var parts = [type, name, date].filter(Boolean).map(function(s){ return String(s).trim(); }).filter(Boolean);
+  return parts.length ? parts.join(' · ') : null;
+}
+
+// Best-effort "breach source" string, promoted to a shared info node so events /
+// credentials from the same source can be grouped and selected together. Returns
+// null when nothing source-like is present.
+function flareSource(rec){
+  rec = rec || {};
+  var s = rec.source;
+  if(s && typeof s === 'object'){ s = s.name || s.id; }
+  s = s || rec.actor || (rec.import_session && rec.import_session.name) || rec.source_id || rec.breach || null;
+  if(!s){ return null; }
+  s = String(s).trim();
+  return s ? s.slice(0, 120) : null;
+}
+
 io.on('connection', function(socket){
   socket.on('whois_lookup', function(query){
     var whois = require('whois')
@@ -617,7 +678,14 @@ io.on('connection', function(socket){
             if(secret){
               // Scope the credential id to its identity so a password reused across two
               // accounts stays under each owner instead of merging onto one shared node.
-              io.emit('add_node', { id: emailParent + ' : ' + secret, parent: emailParent, node_type: 'credential' });
+              var credId = emailParent + ' : ' + secret;
+              io.emit('add_node', { id: credId, parent: emailParent, node_type: 'credential', meta: flareMeta(c) });
+              // Promote the breach source to a shared info node so every credential from
+              // the same leak groups under it (selectable/groupable in graph + list).
+              var credSource = flareSource(c);
+              if(credSource){
+                io.emit('add_node', { id: 'source: ' + credSource, parent: credId, node_type: 'info' });
+              }
             }
           }
         }
@@ -649,7 +717,14 @@ io.on('connection', function(socket){
           for(var i = 0; i < items.length; i++){
             var ev = items[i] || {};
             if(!ev.uid){ continue; }
-            io.emit('add_node', { id: ev.uid, parent: nodeId, node_type: 'event' });
+            // Keep the id = uid (guaranteed unique) but ship a human-readable label
+            // and the full metadata so the node isn't an opaque UID in either view.
+            io.emit('add_node', { id: ev.uid, parent: nodeId, node_type: 'event',
+                                  label: flareEventLabel(ev), meta: flareMeta(ev) });
+            var evSource = flareSource(ev);
+            if(evSource){
+              io.emit('add_node', { id: 'source: ' + evSource, parent: ev.uid, node_type: 'info' });
+            }
           }
         }
       );
