@@ -7,23 +7,82 @@
     <script type="text/javascript" src="./scripts/vivagraph.min.js"></script>
     <script type="text/javascript" src="./scripts/socket.io.js"></script>
     <style>
+      /* ---------- Theme tokens (light default, dark override) ---------- */
+      :root {
+        --bg: #eef1f5; --fg: #1a2230; --muted: #5b6672;
+        --panel: #ffffffee; --panel-border: #d6dce5; --panel-shadow: rgba(20,30,50,.12);
+        --field-bg: #ffffff; --field-border: #c4ccd8;
+        --btn-bg: #f3f5f9; --btn-bg-hover: #e6ebf3; --btn-border: #c4ccd8;
+        --row-hover: rgba(47,111,237,.12);
+        --accent: #2f6fed; --label: #17202e; --label-halo: rgba(255,255,255,.92); --label-selected: #1546b3;
+        --edge: rgba(90,105,130,.45);
+        --benign: rgba(40,170,90,.16); --ratelimit: rgba(224,168,0,.18); --warning: rgba(224,60,60,.16);
+      }
+      :root[data-theme="dark"] {
+        --bg: #0e1420; --fg: #dbe3ee; --muted: #8b97a8;
+        --panel: #161d2be6; --panel-border: #2a3547; --panel-shadow: rgba(0,0,0,.45);
+        --field-bg: #0f1725; --field-border: #33415a;
+        --btn-bg: #1e2836; --btn-bg-hover: #27344a; --btn-border: #33415a;
+        --row-hover: rgba(79,140,255,.20);
+        --accent: #4f8cff; --label: #e7eefb; --label-halo: rgba(3,7,14,.88); --label-selected: #8fb8ff;
+        --edge: rgba(120,140,175,.32);
+        --benign: rgba(46,190,110,.18); --ratelimit: rgba(224,168,0,.20); --warning: rgba(235,80,80,.20);
+      }
+
       html, body {margin: 0; height: 100%; overflow: hidden}
+      body { background: var(--bg); color: var(--fg);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        transition: background .2s ease, color .2s ease; }
 
-      tr:hover {
-        background-color: #0ff;
+      /* ---------- Graph nodes ---------- */
+      text.node {
+        fill: var(--label); opacity: 0; pointer-events: none; user-select: none;
+        font: 600 11px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        paint-order: stroke; stroke: var(--label-halo); stroke-width: 3px; stroke-linejoin: round;
       }
+      .node-group:hover text.node { opacity: 1; }
+      text.node.selected { opacity: 1 !important; fill: var(--label-selected) !important; }
+      .node-icon { cursor: pointer; transition: filter .12s ease; }
+      .node-group:hover .node-icon { filter: drop-shadow(0 0 3px var(--accent)); }
+      text.node.selected + image { filter: drop-shadow(0 0 4px var(--accent)) drop-shadow(0 0 2px var(--accent)); }
+      line { stroke: var(--edge); }
 
-      .warning {
-        background-color: rgba(255, 0, 0, 0.3);
+      /* ---------- Panels (settings + stats) ---------- */
+      #settings, #stats_table {
+        background: var(--panel); color: var(--fg);
+        border: 1px solid var(--panel-border); border-radius: 10px;
+        box-shadow: 0 6px 22px var(--panel-shadow); padding: 10px 12px;
+        backdrop-filter: blur(6px); font-size: 12px;
       }
+      #settings span { color: var(--muted); }
 
-      .ratelimit {
-        background-color: rgba(255, 255, 0, 0.3);
+      /* ---------- Form controls ---------- */
+      input[type="text"], input[type="password"] {
+        background: var(--field-bg); color: var(--fg);
+        border: 1px solid var(--field-border); border-radius: 6px;
+        padding: 4px 7px; font-size: 12px; outline: none;
       }
+      input[type="text"]:focus, input[type="password"]:focus { border-color: var(--accent); }
+      button {
+        background: var(--btn-bg); color: var(--fg);
+        border: 1px solid var(--btn-border); border-radius: 6px;
+        padding: 4px 9px; font-size: 12px; cursor: pointer; transition: background .12s ease;
+      }
+      button:hover { background: var(--btn-bg-hover); }
 
-      .benign {
-        background-color: rgba(0, 255, 0, 0.3);
-      }
+      /* ---------- Menu / stats tables ---------- */
+      #options_table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+      #options_table tr { border-radius: 5px; }
+      #options_table td { padding: 3px 8px; }
+      #options_table td:last-child { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+      #stats_table td { padding: 2px 6px; }
+      #stats_table td:last-child { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+      tr.control, tr.stat { cursor: pointer; }
+      tr:hover { background-color: var(--row-hover); }
+
+      .warning   { background-color: var(--warning); }
+      .ratelimit { background-color: var(--ratelimit); }
+      .benign    { background-color: var(--benign); }
 
       /* The switch - the box around the slider */
       .switch {
@@ -90,6 +149,15 @@
     </style>
     <script type="text/javascript">
         link_switch = false;
+        // Display label for a node: credential nodes show just the secret (their identity
+        // is already the parent node); every other type shows its full id.
+        function label_for(node){
+          if(node.data === 'credential'){
+            var sep = node.id.indexOf(' : ');
+            return sep === -1 ? node.id : node.id.slice(sep + 3);
+          }
+          return node.id;
+        }
         function main () {
             // This demo shows how to create an SVG node which is a bit more complex
             // than single image. Do accomplish this we use 'g' element and
@@ -102,18 +170,20 @@
             //graph.addNode('indexzero', 'd43e8ea63b61e7669ded5b9d3c2e980f');
             //graph.addLink('anvaka', 'indexzero');
             graphics.node(function(node) {
-              // This time it's a group of elements: http://www.w3.org/TR/SVG/struct.html#Groups
-              var ui = Viva.Graph.svg('g'),
-                  // Create SVG text element with user id as content
+              // Group of elements: a label (text) plus the node-type icon (image).
+              var ui = Viva.Graph.svg('g').attr('class', 'node-group'),
+                  // Label is hidden by default (CSS) and revealed on hover / when selected.
                   svgText = Viva.Graph.svg('text')
-                     .attr('y', '-4px')
-                     .text(node.id)
+                     .attr('y', '-6px')
+                     .text(label_for(node))
                      .attr("class", "node")
                      .attr("id", node.id),
+                  // Icon is the click target for selection (so labels can stay hidden).
                   img = Viva.Graph.svg('image')
+                     .attr("class", "node-icon")
+                     .attr("node-id", node.id)
                      .attr('width', nodeSize)
                      .attr('height', nodeSize)
-                     //.link('https://secure.gravatar.com/avatar/' + node.data);
                      .link('./images/' + node.data);
               ui.append(svgText);
               ui.append(img);
@@ -164,6 +234,9 @@
             if($.cookie('flare_api_key_cookie') !== ""){
               $("#flare_api_key").val($.cookie('flare_api_key_cookie'))
             }
+            if($.cookie('flare_tenant_cookie') !== ""){
+              $("#flare_tenant").val($.cookie('flare_tenant_cookie'))
+            }
             if($.cookie('port_list') !== ""){
               $("#port_list").val($.cookie('port_list'))
             }
@@ -173,6 +246,9 @@
             if($.cookie('stats_visible') == "false"){
               $("#stats_table").hide()
             }
+            var saved_theme = $.cookie('theme') || 'dark'
+            document.documentElement.setAttribute('data-theme', saved_theme)
+            $("#theme_toggle").text(saved_theme === 'dark' ? '☀️' : '🌙')
           }catch(err){
             console.log("problem setting cookies")
           }
@@ -230,6 +306,10 @@
 
           $("#flare_api_key").focusout(function(){
             document.cookie = "flare_api_key_cookie=" + $("#flare_api_key").val()
+          })
+
+          $("#flare_tenant").focusout(function(){
+            document.cookie = "flare_tenant_cookie=" + $("#flare_tenant").val()
           })
 
           $("#port_list").focusout(function(){
@@ -567,19 +647,23 @@
           });
 
           function bind_node_click(){
-            $(".node").on("click", function(){
+            // Selection is driven by clicking the icon; the sibling label element still
+            // carries the .node class + id, so all other selection code is unchanged.
+            $(".node-icon").off("click").on("click", function(){
+              var node_id = this.getAttribute("node-id")
+              var textEl = this.parentNode.getElementsByClassName("node")[0]
               if(link_switch){
                 selected = $(".selected")[0].id
-                mygraph.addLink(selected, this.id)
-                all_connections[selected][this.id] = mygraph.getNode(this.id).data
-                all_connections[this.id][selected] = mygraph.getNode(selected).data
+                mygraph.addLink(selected, node_id)
+                all_connections[selected][node_id] = mygraph.getNode(node_id).data
+                all_connections[node_id][selected] = mygraph.getNode(selected).data
                 $("#connect_nodes").css("background-color", "rgba(0, 255, 0, 0.3)")
                 link_switch = false;
               }else{
                 $(".node").attr("fill", "black")
                 $(".node").attr("class", "node")
-                this.attr("fill", "green")
-                this.attr("class", "node selected")
+                textEl.setAttribute("fill", "green")
+                textEl.setAttribute("class", "node selected")
               }
             })
           }
@@ -589,6 +673,14 @@
             $("#connect_nodes").trigger("blur")
             //flip the semaphore
             link_switch = true;
+          })
+
+          $("#theme_toggle").click(function(){
+            var next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'
+            document.documentElement.setAttribute('data-theme', next)
+            document.cookie = 'theme=' + next
+            $("#theme_toggle").text(next === 'dark' ? '☀️' : '🌙')
+            $("#theme_toggle").trigger("blur")
           })
 
           $("#hide_settings").click(function(){
@@ -897,8 +989,7 @@
           })
 
           $("#flare_api_check").click(function(){
-            flare_api_key = $("#flare_api_key").val()
-            socket.emit('flare_api_check', flare_api_key)
+            socket.emit('flare_api_check', {flare_api_key: $("#flare_api_key").val(), flare_tenant: $("#flare_tenant").val()})
           })
 
           $("#flare_credentials").click(function(){
@@ -909,6 +1000,7 @@
                 query_object.node_id = this.id
                 query_object.node_type = node_type
                 query_object.flare_api_key = $("#flare_api_key").val()
+                query_object.flare_tenant = $("#flare_tenant").val()
                 socket.emit('flare_credentials', query_object)
               }else{
                 alert("Flare lookup must be performed on a domain or email node.")
@@ -925,6 +1017,7 @@
                 query_object.node_id = this.id
                 query_object.node_type = node_type
                 query_object.flare_api_key = $("#flare_api_key").val()
+                query_object.flare_tenant = $("#flare_tenant").val()
                 socket.emit('flare_events', query_object)
               }else{
                 alert("Flare lookup must be performed on a domain or email node.")
@@ -1192,6 +1285,7 @@
   <input id="safety_mode" type="checkbox" checked>
   <span class="slider round"></span>
 </label><span id="safety_label">"Safety" Mode ON</span>
+<button id="theme_toggle" title="Toggle light/dark theme" style="margin-left:10px;">🌙</button>
 <input id="search_field" type="text" value="Find Node (f)" style="position:absolute;right:0px;" />
 <div id="settings" style="position:absolute;left:0px;top:30px;">
   <span>shodan key:</span><input id="shodan_api_key" type="password" value="Shodan api key here" />
@@ -1203,6 +1297,8 @@
   <span>Whoxy key:</span><input id="whoxy_api_key" type="password" value="Whoxy.com api key here" /><button id="whoxy_api_check">Status</button>
   <br>
   <span>Flare key:</span><input id="flare_api_key" type="password" value="Flare.io api key here" /><button id="flare_api_check">Status</button>
+  <br>
+  <span>Flare tenant:</span><input id="flare_tenant" type="text" placeholder="(optional) tenant id" />
   <table id="options_table">
     <tr class="control benign" id="hide_settings"><td>Hide Settings</td><td>(h)(H)</td></tr>
     <tr ><td><b>Graph Operations:</b></td><td></td></tr>

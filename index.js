@@ -150,15 +150,18 @@ function flarePost(path, headers, body, cb){
   req.end();
 }
 
-// Exchange the API key for a short-lived token (cached ~50m per key). cb(err, token).
-function flareToken(apiKey, cb){
+// Exchange the API key for a short-lived token, optionally scoped to a tenant.
+// The token is tenant-scoped, so the cache is keyed by apiKey+tenant. cb(err, token).
+function flareToken(apiKey, tenant, cb){
   if(!apiKey){ cb('no API key set (settings panel or FLARE_API_KEY env)'); return; }
-  var cached = flareTokenCache[apiKey];
+  var cacheKey = apiKey + '|' + (tenant || '');
+  var cached = flareTokenCache[cacheKey];
   if(cached && (Date.now() - cached.ts) < 50 * 60 * 1000){ cb(null, cached.token); return; }
-  flarePost('/tokens/generate', { 'Authorization': apiKey }, null, function(err, status, parsed){
+  var path = '/tokens/generate' + (tenant ? '?tenant=' + encodeURIComponent(tenant) : '');
+  flarePost(path, { 'Authorization': apiKey }, null, function(err, status, parsed){
     if(err){ cb('token request failed: ' + err.message); return; }
     if(status !== 200 || !parsed || !parsed.token){ cb('token generation failed (HTTP ' + status + ')'); return; }
-    flareTokenCache[apiKey] = { token: parsed.token, ts: Date.now() };
+    flareTokenCache[cacheKey] = { token: parsed.token, ts: Date.now() };
     cb(null, parsed.token);
   });
 }
@@ -563,8 +566,10 @@ io.on('connection', function(socket){
   });
 
   // Validate a Flare API key (settings "Status" button): try a token exchange.
-  socket.on('flare_api_check', function(apiKey){
-    flareToken(apiKey, function(err, token){
+  socket.on('flare_api_check', function(query_object){
+    var apiKey = (query_object && query_object.flare_api_key) || process.env.FLARE_API_KEY;
+    var tenant = (query_object && query_object.flare_tenant) || process.env.FLARE_TENANT;
+    flareToken(apiKey, tenant, function(err, token){
       if(err){ io.emit('server_message', 'Flare: ' + err); return; }
       io.emit('server_message', 'Flare API key OK (token acquired)');
     });
@@ -573,6 +578,7 @@ io.on('connection', function(socket){
   // Flare leaked-credential lookup: domain/email node -> leaked emails + passwords.
   socket.on('flare_credentials', function(query_object){
     var apiKey = (query_object && query_object.flare_api_key) || process.env.FLARE_API_KEY;
+    var tenant = (query_object && query_object.flare_tenant) || process.env.FLARE_TENANT;
     var nodeId = query_object.node_id;
     var nodeType = query_object.node_type;
     if(['network','subdomain','email'].indexOf(nodeType) === -1){
@@ -581,7 +587,7 @@ io.on('connection', function(socket){
     }
     var q = flareQueryForNode(nodeId, nodeType);
     var lowerDomain = (nodeType === 'email') ? null : String(nodeId).toLowerCase();
-    flareToken(apiKey, function(err, token){
+    flareToken(apiKey, tenant, function(err, token){
       if(err){ io.emit('server_message', 'Flare credentials: ' + err); return; }
       flarePaginate('/firework/v4/credentials/global/_search', token,
         function(from){
@@ -622,6 +628,7 @@ io.on('connection', function(socket){
   // Flare threat-event lookup: domain/email node -> breach/stealer-log/paste events.
   socket.on('flare_events', function(query_object){
     var apiKey = (query_object && query_object.flare_api_key) || process.env.FLARE_API_KEY;
+    var tenant = (query_object && query_object.flare_tenant) || process.env.FLARE_TENANT;
     var nodeId = query_object.node_id;
     var nodeType = query_object.node_type;
     if(['network','subdomain','email'].indexOf(nodeType) === -1){
@@ -629,7 +636,7 @@ io.on('connection', function(socket){
       return;
     }
     var q = flareQueryForNode(nodeId, nodeType);
-    flareToken(apiKey, function(err, token){
+    flareToken(apiKey, tenant, function(err, token){
       if(err){ io.emit('server_message', 'Flare events: ' + err); return; }
       flarePaginate('/firework/v4/events/global/_search', token,
         function(from){
