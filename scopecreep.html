@@ -247,10 +247,13 @@
         node_labels = {};  // id -> friendly display label (e.g. readable breach events)
 
         // Preferred ordering for metadata rows; anything else falls in alphabetically.
+        // Covers both the credential shape (top-level source object, hash_type, ...)
+        // and the event shape (index, metadata.source, metadata.estimated_created_at).
         function ordered_meta_keys(meta){
-          var pref = ['source','source.name','type','event_type','name','title','actor',
-                      'domain','hash_type','plaintext','leaked_at','imported_at',
-                      'created_at','timestamp','risk_score','severity'];
+          var pref = ['source','source.name','metadata.source','type','index','event_type',
+                      'name','title','actor','domain','hash_type','plaintext',
+                      'source.leaked_at','leaked_at','imported_at','metadata.estimated_created_at',
+                      'created_at','timestamp','metadata.first_crawled_at','risk_score','severity'];
           var head = pref.filter(function(k){ return meta[k] !== undefined; });
           var tail = Object.keys(meta).filter(function(k){ return pref.indexOf(k) === -1; }).sort();
           return head.concat(tail);

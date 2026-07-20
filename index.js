@@ -237,13 +237,17 @@ function flareMeta(rec){
 
 // Best-effort human label for a breach event (its uid is opaque). Returns null
 // when none of the expected fields are present, so callers fall back to the uid.
+// Flare's global events carry the type in `index`, the date in
+// `metadata.estimated_created_at`, and the source in `metadata.source`; credential-
+// style records use top-level fields. Both shapes are handled.
 function flareEventLabel(ev){
   ev = ev || {};
-  var src = ev.source;
+  var md = ev.metadata || {};
+  var src = ev.source || md.source;
   var srcName = (src && typeof src === 'object') ? src.name : src;
-  var type = ev.type || (src && typeof src === 'object' && src.type) || (ev.metadata && ev.metadata.type);
+  var type = ev.type || ev.index || md.type;
   var name = ev.name || srcName || ev.title || ev.actor;
-  var date = ev.created_at || ev.timestamp || ev.imported_at || ev.leaked_at;
+  var date = ev.created_at || md.estimated_created_at || ev.timestamp || md.first_crawled_at || ev.imported_at || ev.leaked_at;
   if(date){ date = String(date).slice(0, 10); }
   var parts = [type, name, date].filter(Boolean).map(function(s){ return String(s).trim(); }).filter(Boolean);
   return parts.length ? parts.join(' · ') : null;
@@ -251,12 +255,14 @@ function flareEventLabel(ev){
 
 // Best-effort "breach source" string, promoted to a shared info node so events /
 // credentials from the same source can be grouped and selected together. Returns
-// null when nothing source-like is present.
+// null when nothing source-like is present. Credential records expose `source` as
+// an object ({name, leaked_at, ...}); events nest it under `metadata.source`.
 function flareSource(rec){
   rec = rec || {};
-  var s = rec.source;
+  var md = rec.metadata || {};
+  var s = rec.source || md.source;
   if(s && typeof s === 'object'){ s = s.name || s.id; }
-  s = s || rec.actor || (rec.import_session && rec.import_session.name) || rec.source_id || rec.breach || null;
+  s = s || rec.actor || md.actor || rec.source_id || rec.breach || null;
   if(!s){ return null; }
   s = String(s).trim();
   return s ? s.slice(0, 120) : null;
