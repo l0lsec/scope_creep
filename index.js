@@ -106,6 +106,98 @@ app.get('/images/phone', function(req, res){
   res.sendFile(__dirname + '/images/phone.svg');
 });
 
+app.get('/images/credential', function(req, res){
+  res.sendFile(__dirname + '/images/credential.svg');
+});
+
+app.get('/images/event', function(req, res){
+  res.sendFile(__dirname + '/images/event.svg');
+});
+
+// ---------- Flare API client (ported from flare-lookup-cli) ----------
+// Talks to https://api.flare.io: exchange an API key for a short-lived Bearer
+// token, then POST the global credentials/events search endpoints and follow
+// the `next` cursor. Node building is done with object literals by the callers
+// (breach data is full of quotes/$/%/backslashes that break string-built JSON).
+var FLARE_HOST = 'api.flare.io';
+var FLARE_CRED_PAGE_SIZE = 1000;   // API max is 10000; big pages -> fewer round-trips
+var FLARE_EVENT_PAGE_SIZE = 10;    // API max for events
+var flareTokenCache = {};          // apiKey -> { token, ts }
+
+// Low-level POST to api.flare.io. cb(err, statusCode, parsedJsonOrNull).
+function flarePost(path, headers, body, cb){
+  var payload = body ? JSON.stringify(body) : '';
+  var finished = false;
+  function done(err, status, parsed){ if(finished){ return; } finished = true; cb(err, status, parsed); }
+  var options = {
+    host: FLARE_HOST,
+    path: path,
+    method: 'POST',
+    headers: Object.assign({ 'Content-Length': Buffer.byteLength(payload) }, headers)
+  };
+  var req = https_resolver.request(options, function(res){
+    var data = '';
+    res.on('data', function(chunk){ data += chunk; });
+    res.on('end', function(){
+      var parsed = null;
+      try { parsed = data ? JSON.parse(data) : null; } catch(e) { parsed = null; }
+      done(null, res.statusCode, parsed);
+    });
+  });
+  req.on('error', function(err){ done(err); });
+  req.setTimeout(60000, function(){ req.destroy(new Error('Flare request timeout')); });
+  if(payload){ req.write(payload); }
+  req.end();
+}
+
+// Exchange the API key for a short-lived token (cached ~50m per key). cb(err, token).
+function flareToken(apiKey, cb){
+  if(!apiKey){ cb('no API key set (settings panel or FLARE_API_KEY env)'); return; }
+  var cached = flareTokenCache[apiKey];
+  if(cached && (Date.now() - cached.ts) < 50 * 60 * 1000){ cb(null, cached.token); return; }
+  flarePost('/tokens/generate', { 'Authorization': apiKey }, null, function(err, status, parsed){
+    if(err){ cb('token request failed: ' + err.message); return; }
+    if(status !== 200 || !parsed || !parsed.token){ cb('token generation failed (HTTP ' + status + ')'); return; }
+    flareTokenCache[apiKey] = { token: parsed.token, ts: Date.now() };
+    cb(null, parsed.token);
+  });
+}
+
+// One search page with 429 exponential backoff (2/4/8s, 4 attempts). cb(err, items, next).
+function flareSearchPage(path, token, body, attempt, cb){
+  flarePost(path, { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' }, body, function(err, status, parsed){
+    if(err){ cb(err); return; }
+    if(status === 429){
+      if(attempt >= 3){ cb(new Error('429 Too Many Requests after retries')); return; }
+      setTimeout(function(){ flareSearchPage(path, token, body, attempt + 1, cb); }, Math.pow(2, attempt + 1) * 1000);
+      return;
+    }
+    if(status !== 200){ cb(new Error('search HTTP ' + status)); return; }
+    cb(null, (parsed && parsed.items) || [], parsed && parsed.next);
+  });
+}
+
+// Follow the `next` cursor (maxPages falsy = all pages), 1s between pages. onItems(items) per page.
+function flarePaginate(path, token, buildBody, maxPages, onItems){
+  var page = 0;
+  function nextPage(from){
+    if(maxPages && page >= maxPages){ return; }
+    page++;
+    flareSearchPage(path, token, buildBody(from), 0, function(err, items, next){
+      if(err){ io.emit('server_message', 'Flare: ' + err.message); return; }
+      onItems(items);
+      if(next && (!maxPages || page < maxPages)){ setTimeout(function(){ nextPage(next); }, 1000); }
+    });
+  }
+  nextPage(null);
+}
+
+// Map a selected graph node to a Flare query object (email vs domain/fqdn).
+function flareQueryForNode(nodeId, nodeType){
+  if(nodeType === 'email'){ return { type: 'email', email: nodeId }; }
+  return { type: 'domain', fqdn: nodeId }; // network / subdomain
+}
+
 io.on('connection', function(socket){
   socket.on('whois_lookup', function(query){
     var whois = require('whois')
@@ -467,6 +559,93 @@ io.on('connection', function(socket){
 
     }).on("error", (err) => {
        console.log("Error: " + err.message);
+    });
+  });
+
+  // Validate a Flare API key (settings "Status" button): try a token exchange.
+  socket.on('flare_api_check', function(apiKey){
+    flareToken(apiKey, function(err, token){
+      if(err){ io.emit('server_message', 'Flare: ' + err); return; }
+      io.emit('server_message', 'Flare API key OK (token acquired)');
+    });
+  });
+
+  // Flare leaked-credential lookup: domain/email node -> leaked emails + passwords.
+  socket.on('flare_credentials', function(query_object){
+    var apiKey = (query_object && query_object.flare_api_key) || process.env.FLARE_API_KEY;
+    var nodeId = query_object.node_id;
+    var nodeType = query_object.node_type;
+    if(['network','subdomain','email'].indexOf(nodeType) === -1){
+      io.emit('server_message', 'Flare lookup: select a domain or email node');
+      return;
+    }
+    var q = flareQueryForNode(nodeId, nodeType);
+    var lowerDomain = (nodeType === 'email') ? null : String(nodeId).toLowerCase();
+    flareToken(apiKey, function(err, token){
+      if(err){ io.emit('server_message', 'Flare credentials: ' + err); return; }
+      flarePaginate('/firework/v4/credentials/global/_search', token,
+        function(from){
+          var b = { query: q, size: FLARE_CRED_PAGE_SIZE, order: 'desc' };
+          if(from){ b.from = from; }
+          return b;
+        },
+        null, // no cap: page through every result
+        function(items){
+          for(var i = 0; i < items.length; i++){
+            var c = items[i] || {};
+            var identity = (c.identity_name || '').trim();
+            if(!identity || identity.indexOf('@') === -1){ continue; }
+            // For a domain search, keep only identities that belong to the domain (drops noise).
+            if(lowerDomain){
+              var recDomain = (c.domain || '').toLowerCase();
+              if(identity.toLowerCase().indexOf('@' + lowerDomain) === -1 && recDomain !== lowerDomain){ continue; }
+            }
+            var emailParent;
+            if(nodeType === 'email'){
+              emailParent = nodeId; // credentials hang off the already-selected email node
+            } else {
+              io.emit('add_node', { id: identity, parent: nodeId, node_type: 'email' });
+              emailParent = identity;
+            }
+            var secret = (c.hash || '').trim();
+            if(secret){
+              // Scope the credential id to its identity so a password reused across two
+              // accounts stays under each owner instead of merging onto one shared node.
+              io.emit('add_node', { id: emailParent + ' : ' + secret, parent: emailParent, node_type: 'credential' });
+            }
+          }
+        }
+      );
+    });
+  });
+
+  // Flare threat-event lookup: domain/email node -> breach/stealer-log/paste events.
+  socket.on('flare_events', function(query_object){
+    var apiKey = (query_object && query_object.flare_api_key) || process.env.FLARE_API_KEY;
+    var nodeId = query_object.node_id;
+    var nodeType = query_object.node_type;
+    if(['network','subdomain','email'].indexOf(nodeType) === -1){
+      io.emit('server_message', 'Flare lookup: select a domain or email node');
+      return;
+    }
+    var q = flareQueryForNode(nodeId, nodeType);
+    flareToken(apiKey, function(err, token){
+      if(err){ io.emit('server_message', 'Flare events: ' + err); return; }
+      flarePaginate('/firework/v4/events/global/_search', token,
+        function(from){
+          var b = { query: q, size: FLARE_EVENT_PAGE_SIZE, order: 'desc' };
+          if(from){ b.from = from; }
+          return b;
+        },
+        null, // no cap: page through every result
+        function(items){
+          for(var i = 0; i < items.length; i++){
+            var ev = items[i] || {};
+            if(!ev.uid){ continue; }
+            io.emit('add_node', { id: ev.uid, parent: nodeId, node_type: 'event' });
+          }
+        }
+      );
     });
   });
 
