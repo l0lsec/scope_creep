@@ -405,7 +405,7 @@ io.on('connection', function(socket){
   });
 
   socket.on('subdomain_lookup', function(query){
-    http_resolver.get('http://api.hackertarget.com/hostsearch/?q=' + query,  (resp) => {
+    https_resolver.get('https://api.hackertarget.com/hostsearch/?q=' + query,  (resp) => {
       let data = '';
 
       resp.on('data', (chunk) => {
@@ -413,19 +413,23 @@ io.on('connection', function(socket){
       });
 
       resp.on('end', () => {
+        if(resp.statusCode != 200){
+          console.log("hackertarget hostsearch returned status " + resp.statusCode + " for " + query)
+          return
+        }
+        lower_query = query.toLowerCase()
         lines = data.split('\n')
         for(line in lines){
           subdomain = lines[line].split(',')
-          subdomain_name = subdomain[0]
-          subdomain_ip = subdomain[1]
-          if(subdomain_name.split('.').length == 2){
-            new_node = JSON.parse('{"id": "'+ subdomain_name + '", "parent": "' + query + '", "node_type": "network"}')
-          }else{
-            new_node = JSON.parse('{"id": "'+ subdomain_name + '", "parent": "' + query + '", "node_type": "subdomain"}')
+          subdomain_name = (subdomain[0] || '').trim().toLowerCase()
+          subdomain_ip = (subdomain[1] || '').trim()
+          // Only accept real hosts belonging to the queried domain (drops HTML/error bodies)
+          if(subdomain_name != lower_query && !subdomain_name.endsWith('.' + lower_query)){ continue }
+          node_type = subdomain_name.split('.').length == 2 ? "network" : "subdomain"
+          io.emit('add_node', {id: subdomain_name, parent: query, node_type: node_type})
+          if(/^(\d{1,3}\.){3}\d{1,3}$/.test(subdomain_ip)){
+            io.emit('add_node', {id: subdomain_ip, parent: subdomain_name, node_type: "server"})
           }
-          io.emit('add_node', new_node)
-          new_node = JSON.parse('{"id": "'+ subdomain_ip + '", "parent": "' + subdomain_name + '", "node_type": "server"}')
-          io.emit('add_node', new_node)
         }
       });
 
@@ -441,13 +445,22 @@ io.on('connection', function(socket){
       });
 
       resp.on('end', () => {
-        results = JSON.parse(data).passive_dns
+        var results
+        try {
+          results = JSON.parse(data).passive_dns
+        } catch(err) {
+          console.log("Error parsing AlienVault OTX response: " + err.message)
+          return
+        }
+        if(!Array.isArray(results)){ return }
+        lower_query = query.toLowerCase()
         for(i=0;i<results.length;i++){
-          new_node = JSON.parse('{"id": "'+ results[i].hostname + '", "parent": "' + query + '", "node_type": "subdomain"}')
-          io.emit('add_node', new_node)
+          if(!results[i].hostname){ continue }
+          hostname = results[i].hostname.trim().toLowerCase()
+          if(hostname != lower_query && !hostname.endsWith('.' + lower_query)){ continue }
+          io.emit('add_node', {id: hostname, parent: query, node_type: "subdomain"})
           if(results[i].address){
-            new_node = JSON.parse('{"id": "'+ results[i].address + '", "parent": "' + results[i].hostname + '", "node_type": "server"}')
-            io.emit('add_node', new_node)
+            io.emit('add_node', {id: results[i].address, parent: hostname, node_type: "server"})
           }
         }
       });
@@ -570,13 +583,10 @@ io.on('connection', function(socket){
         do {
           match = myRegexp.exec(data);
           if (match) {
-            if(match[1].split('.').length > 2){
-              new_node = JSON.parse('{"id": "'+ match[1].toLowerCase() + '", "parent": "' + query + '", "node_type": "subdomain"}')
-              io.emit('add_node', new_node)
-            }else{
-              new_node = JSON.parse('{"id": "'+ match[1].toLowerCase() + '", "parent": "' + query + '", "node_type": "network"}')
-              io.emit('add_node', new_node)
-            }
+            subdomain_name = match[1].toLowerCase().trim()
+            if(!subdomain_name){ continue }
+            node_type = subdomain_name.split('.').length > 2 ? "subdomain" : "network"
+            io.emit('add_node', {id: subdomain_name, parent: query, node_type: node_type})
           }
         } while (match);
       });
