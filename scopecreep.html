@@ -416,9 +416,12 @@
           // DOMMouseScroll, bubbling phase). Wheeling over a floating UI panel
           // would otherwise bubble up and zoom the graph instead of scrolling
           // the panel. Stop the wheel there — but don't preventDefault, so the
-          // panel still scrolls natively.
-          ['wheel', 'mousewheel', 'DOMMouseScroll'].forEach(function(evt){
-            ['settings', 'session_panel', 'stats_table'].forEach(function(id){
+          // panel still scrolls natively. (Assigned to vars first so the
+          // statement doesn't start with "[" and trip ASI on the line above.)
+          var wheel_events = ['wheel', 'mousewheel', 'DOMMouseScroll']
+          var wheel_panels = ['settings', 'session_panel', 'stats_table']
+          wheel_events.forEach(function(evt){
+            wheel_panels.forEach(function(id){
               var el = document.getElementById(id)
               if(el){ el.addEventListener(evt, function(e){ e.stopPropagation() }, false) }
             })
