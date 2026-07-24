@@ -47,6 +47,7 @@ Usage/Modules
 - You can select multiple nodes by either clicking on their row in the stats list or by using the node search.
 - Node search/find(f) supports JavaScript regular expressions (e.g. 'domain.com' will select the domain and its subdomains but '^domain.com' will only select the domain and no subs). [regex reference](https://eloquentjavascript.net/09_regexp.html)
 - Add values for [shodan](https://www.shodan.io/) api key, [whoxy](https://www.whoxy.com/reverse-whois/) api key, [li_at](https://www.linkedin.com/) cookie, [hunter.io](https://hunter.io/users/sign_up) api key, and [flare.io](https://flare.io/) api key to use those features. The value is saved in a cookie when you click out of the input so that they persist between page reloads.
+- For automated dorking, add a [Google Programmable Search](https://developers.google.com/custom-search/v1/overview) API key **and** its search-engine id (`cx`), and a [GitHub personal access token](https://github.com/settings/tokens) (GitHub code search requires authentication). These are optional — the Dork Generator builds ready-to-run search links with no keys at all. Like the other credentials, they persist in cookies between reloads.
 - The Flare tenant id field is optional. Leave it blank to use the default tenant on your Flare account, or set it to scope lookups to a specific tenant. Use the "Status" button next to the Flare key to confirm your key/tenant are valid.
 - The toolbar has a few display toggles: switch between the force-directed graph and a tabular **List View**, flip the **theme** between dark and light (🌙/☀️), and cycle **node labels** between off, all, and selected-only (see below). These preferences persist in cookies between reloads.
 - The li_at cookie is LinkedIn's session cookie and required to mine LinkedIn with Scope Creep. I recommend [editthiscookie](http://www.editthiscookie.com/) extension for Chrome to get your current session cookie.
@@ -184,6 +185,30 @@ Queries the [Flare](https://flare.io/) API for leaked credentials tied to the se
 
 ### Flare Breach Events(j):
 Queries the Flare API for breach/threat events associated with the selected domain/network, subdomain, or email nodes. Results attach as breach event nodes with friendly labels and metadata (source, date, etc.) that you can read via hover or the List View. Requires a Flare api key in the settings panel (the tenant id is optional).
+
+### HTTP Probe + Screenshot(J):
+Visits the selected web-reachable nodes (domain, subdomain, host, mail, or name server) with a headless browser and turns a wall of hostnames into a triaged attack surface. For each host it tries `https://` then `http://` and, on a live response, attaches a **web service** node carrying the HTTP status, page title, `Server`/`X-Powered-By` headers, resolved IP, a best-effort technology fingerprint (WordPress, Drupal, React, Angular, Vue, jQuery, `<meta generator>`, …), and a **screenshot thumbnail**. Read the metadata and view the screenshot in the List View detail pane (or hover the node for the text summary). Select as many nodes as you like — they're probed in one batch by a single browser instance (capped at 150 hosts per run). Dead hosts are skipped silently. The resolved IP is also spun off as a host node so it folds into the rest of your graph.
+
+### Dork Generator(/):
+From a selected domain, subdomain, or organization node, spins off a set of ready-to-run **dork** nodes — each one a Google, GitHub, Wayback, or crt.sh search URL tuned for sensitive exposure (directory listings, documents, config/backup files, login/admin surfaces, secrets in indexed pages, redirect/SSRF params, employee enumeration, and code/paste leaks). Open any of them in a new tab with **View Website(v)**. This needs no API keys and works instantly — it's the fast, always-available OSINT layer.
+
+### Google Dork Search:
+Runs a curated set of sensitive-exposure dorks (documents, config/backups, directory listings, auth surfaces, secrets in pages) against the selected domain/subdomain through the Google Programmable Search JSON API and attaches the hits as web nodes under a dork node, each with the result title and snippet. Requires a Google CSE api key and search-engine id (`cx`) in the settings panel. Menu-triggered (no key binding) to keep it deliberate — the free tier is limited to ~100 queries/day.
+
+### GitHub Code Dork Search:
+Searches public GitHub code for the selected domain/organization to surface leaked hostnames, internal references, and secrets (env files, config files, and mentions near `password`/`secret`/`api_key`/`token`). Hits attach as info nodes labeled with the repo and file path. GitHub's code search API **requires authentication**, so set a GitHub token in the settings panel. Requests are spaced out to respect the 10-requests/minute limit, so a run takes ~30 seconds. Menu-triggered.
+
+### Wayback URLs(K):
+Pulls archived URLs for the selected domain/subdomain from the Internet Archive's CDX API — a great way to surface forgotten endpoints, old admin panels, and parameterized routes that no longer appear in normal crawling. Results attach as **archived URL** nodes, and any subdomains discovered along the way are added as subdomain nodes too (so Wayback doubles as a passive subdomain source). You'll be prompted for a max number of URLs to pull (default 500, capped at 5000) to keep the graph manageable.
+
+### Subdomain Takeover Check(,):
+Checks the selected domain/subdomain nodes for a **dangling CNAME** — a subdomain still pointing at a de-provisioned SaaS/cloud resource that an attacker (or you, in an assessment) could re-claim. For each host it resolves the CNAME, fetches the live page, and matches the response against a curated set of "unclaimed resource" fingerprints (GitHub Pages, S3, Heroku, Azure, Fastly, Shopify, Zendesk, Netlify, Read the Docs, and more). A match becomes a **Finding** node flagged `⚠ Takeover?` with the service, the CNAME chain, and a confidence rating — *high* when the CNAME and the page signature both point at the same service, *medium* on a body signature alone. Nothing is emitted for healthy hosts, so a clean run leaves the graph untouched.
+
+### Cloud Bucket Enumeration(.):
+Derives a base keyword from the selected domain or organization node, generates name permutations (`-dev`, `-backup`, `-assets`, `-static`, `-uploads`, …), and probes **AWS S3**, **Google Cloud Storage**, and **Azure Blob** for each. Publicly listable buckets become **Finding** nodes (`⚠ Public S3/GCS bucket`); buckets that exist but are private, and Azure storage accounts that resolve, attach as info nodes so you know they're there. Open buckets carry the URL, so **View Website(v)** opens them straight away. This fires a few dozen requests to the cloud providers (not to the client's own infrastructure) and takes a little while — a start and a completion message bracket the run.
+
+### Reverse IP / Shared Hosts(;):
+Given a selected host (IP) node, finds other domains served from the same IP — virtual hosts sharing the box — via the hackertarget reverse-IP API. Discovered hostnames attach to the IP node as domain/subdomain nodes, expanding scope on shared hosting. The free API is rate limited, so use it deliberately; if you burn the quota the tool tells you.
 
 ### Location Search (general rate limit)(L):
 Tries to find the Lat/Long location associated with an IP. You can view location nodes in Google maps by using the "View Website in New Tab(v)" module.

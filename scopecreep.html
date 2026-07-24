@@ -283,6 +283,7 @@
       .meta_table td { padding: 3px 6px; border-bottom: 1px solid var(--panel-border); vertical-align: top; }
       .meta_table td.meta_k { color: var(--muted); white-space: nowrap; width: 1%; padding-right: 12px; }
       .meta_table td.meta_v { word-break: break-word; }
+      .node_shot { max-width: 100%; border-radius: 6px; border: 1px solid var(--panel-border); margin: 4px 0 8px; display: block; }
     </style>
     <script type="text/javascript">
         link_switch = false;
@@ -301,7 +302,8 @@
                       'source.leaked_at','leaked_at','imported_at','metadata.estimated_created_at',
                       'created_at','timestamp','metadata.first_crawled_at','risk_score','severity'];
           var head = pref.filter(function(k){ return meta[k] !== undefined; });
-          var tail = Object.keys(meta).filter(function(k){ return pref.indexOf(k) === -1; }).sort();
+          //screenshot is a data URI rendered as a thumbnail, never as a text row
+          var tail = Object.keys(meta).filter(function(k){ return pref.indexOf(k) === -1 && k !== 'screenshot'; }).sort();
           return head.concat(tail);
         }
 
@@ -417,6 +419,15 @@
             if($.cookie('flare_tenant_cookie') !== ""){
               $("#flare_tenant").val($.cookie('flare_tenant_cookie'))
             }
+            if($.cookie('google_cse_key_cookie') !== ""){
+              $("#google_cse_key").val($.cookie('google_cse_key_cookie'))
+            }
+            if($.cookie('google_cse_cx_cookie') !== ""){
+              $("#google_cse_cx").val($.cookie('google_cse_cx_cookie'))
+            }
+            if($.cookie('github_token_cookie') !== ""){
+              $("#github_token").val($.cookie('github_token_cookie'))
+            }
             if($.cookie('port_list') !== ""){
               $("#port_list").val($.cookie('port_list'))
             }
@@ -491,6 +502,18 @@
 
           $("#flare_tenant").focusout(function(){
             document.cookie = "flare_tenant_cookie=" + $("#flare_tenant").val()
+          })
+
+          $("#google_cse_key").focusout(function(){
+            document.cookie = "google_cse_key_cookie=" + $("#google_cse_key").val()
+          })
+
+          $("#google_cse_cx").focusout(function(){
+            document.cookie = "google_cse_cx_cookie=" + $("#google_cse_cx").val()
+          })
+
+          $("#github_token").focusout(function(){
+            document.cookie = "github_token_cookie=" + $("#github_token").val()
           })
 
           $("#port_list").focusout(function(){
@@ -742,6 +765,30 @@
               //Flare threat-event lookup with 'j' key
               if (e.keyCode==106){
                 $("#flare_events").click()
+              }
+              //HTTP probe + screenshot with 'J' key
+              if (e.keyCode==74){
+                $("#http_probe").click()
+              }
+              //Wayback URL enumeration with 'K' key
+              if (e.keyCode==75){
+                $("#wayback_urls").click()
+              }
+              //Dork generator with '/' key (mnemonic: search)
+              if (e.keyCode==47){
+                $("#dork_generate").click()
+              }
+              //Subdomain takeover check with ',' key
+              if (e.keyCode==44){
+                $("#subdomain_takeover").click()
+              }
+              //Cloud bucket enumeration with '.' key
+              if (e.keyCode==46){
+                $("#cloud_buckets").click()
+              }
+              //Reverse IP / shared hosts with ';' key
+              if (e.keyCode==59){
+                $("#reverse_ip").click()
               }
               //Location search with 'L' key
               if (e.keyCode==76){
@@ -1148,6 +1195,127 @@
             $("#query_shodan").trigger("blur")
           })
 
+          // HTTP probe: gather every selected web-reachable host and probe them in
+          // one batch (server runs a single headless browser over the list).
+          $("#http_probe").click(function(){
+            var targets = []
+            $(".selected").each(function(){
+              var t = mygraph.getNode(this.id).data
+              if(t=='subdomain'||t=='network'||t=='server'||t=='mail'||t=='nameserver'){ targets.push(this.id) }
+            })
+            if(!targets.length){
+              alert("HTTP Probe: select one or more domain, subdomain, host, mail, or name server nodes")
+            }else{
+              socket.emit('http_probe', {targets: targets})
+            }
+            $("#http_probe").trigger("blur")
+          })
+
+          // Build a set of ready-to-run OSINT search URLs for a domain/org node.
+          // Each becomes a 'dork' node you can open with the (v) key -- no API needed.
+          function build_dorks(id, type){
+            var out = []
+            function g(label, q){ out.push({label: 'Google: '+label, url: 'https://www.google.com/search?q=' + encodeURIComponent(q)}) }
+            if(type=='organization'){
+              var o = '"' + id + '"'
+              g('LinkedIn employees', o + ' site:linkedin.com/in')
+              g('Documents', o + ' (filetype:pdf OR filetype:docx OR filetype:xlsx)')
+              g('Code & paste leaks', o + ' (site:github.com OR site:gitlab.com OR site:pastebin.com)')
+              out.push({label:'GitHub: org code', url:'https://github.com/search?type=code&q=' + encodeURIComponent('"'+id+'"')})
+              return out
+            }
+            var s = 'site:' + id + ' '
+            g('Directory listings', s + 'intitle:"index of"')
+            g('Documents', s + '(filetype:pdf OR filetype:doc OR filetype:docx OR filetype:xls OR filetype:xlsx)')
+            g('Config & backups', s + '(ext:env OR ext:ini OR ext:conf OR ext:bak OR ext:old OR ext:sql OR ext:log)')
+            g('Login & admin', s + '(inurl:admin OR inurl:login OR intitle:login)')
+            g('Secrets in pages', s + '("api_key" OR "apikey" OR "authorization: bearer" OR "BEGIN RSA PRIVATE KEY")')
+            g('Redirect/SSRF params', s + '(inurl:redirect OR inurl:url= OR inurl:next=)')
+            out.push({label:'GitHub: domain mentions', url:'https://github.com/search?type=code&q=' + encodeURIComponent('"'+id+'"')})
+            out.push({label:'Wayback: all captures', url:'https://web.archive.org/web/*/' + id + '/*'})
+            out.push({label:'crt.sh: certificates', url:'https://crt.sh/?q=' + encodeURIComponent('%.'+id)})
+            return out
+          }
+
+          $("#dork_generate").click(function(){
+            var made = 0
+            $(".selected").each(function(){
+              var id = this.id
+              var t = mygraph.getNode(id).data
+              if(!(t=='network'||t=='subdomain'||t=='organization')){ return }
+              build_dorks(id, t).forEach(function(d){
+                add_node({id: d.url, parent: id, node_type: 'dork', label: d.label})
+                made++
+              })
+            })
+            if(!made){ alert("Dork Generator: select a domain, subdomain, or organization node") }
+            $("#dork_generate").trigger("blur")
+          })
+
+          $("#dork_google").click(function(){
+            var sel = $(".selected")[0]
+            if(!sel){ alert("Google Dork: select a domain/subdomain node"); return }
+            var t = mygraph.getNode(sel.id).data
+            if(!(t=='network'||t=='subdomain')){ alert("Google Dork: select a domain/subdomain node"); return }
+            socket.emit('dork_google', {node_id: sel.id, google_key: $("#google_cse_key").val(), google_cx: $("#google_cse_cx").val()})
+            $("#dork_google").trigger("blur")
+          })
+
+          $("#dork_github").click(function(){
+            var sel = $(".selected")[0]
+            if(!sel){ alert("GitHub Dork: select a domain or organization node"); return }
+            socket.emit('dork_github', {node_id: sel.id, github_token: $("#github_token").val()})
+            $("#dork_github").trigger("blur")
+          })
+
+          $("#wayback_urls").click(function(){
+            var sel = $(".selected")[0]
+            if(!sel){ alert("Wayback URLs: select a domain/subdomain node"); return }
+            var t = mygraph.getNode(sel.id).data
+            if(!(t=='network'||t=='subdomain')){ alert("Wayback URLs: select a domain/subdomain node"); return }
+            var limit = prompt("Max archived URLs to pull:", "500")
+            if(limit == null){ return }
+            socket.emit('wayback_urls', {node_id: sel.id, limit: limit})
+            $("#wayback_urls").trigger("blur")
+          })
+
+          // Subdomain takeover: check every selected domain/subdomain for a dangling
+          // CNAME pointing at an unclaimed SaaS/cloud resource.
+          $("#subdomain_takeover").click(function(){
+            var hosts = []
+            $(".selected").each(function(){
+              var t = mygraph.getNode(this.id).data
+              if(t=='subdomain'||t=='network'){ hosts.push(this.id) }
+            })
+            if(!hosts.length){
+              alert("Subdomain Takeover: select one or more domain/subdomain nodes")
+            }else{
+              socket.emit('subdomain_takeover', {hosts: hosts})
+            }
+            $("#subdomain_takeover").trigger("blur")
+          })
+
+          // Cloud buckets: enumerate S3/GCS/Azure names derived from a domain/org node.
+          $("#cloud_buckets").click(function(){
+            var sel = $(".selected")[0]
+            if(!sel){ alert("Cloud Buckets: select a domain or organization node"); return }
+            socket.emit('cloud_buckets', {node_id: sel.id})
+            $("#cloud_buckets").trigger("blur")
+          })
+
+          // Reverse IP: find other domains sharing the same host (virtual hosts).
+          $("#reverse_ip").click(function(){
+            var picked = 0
+            $(".selected").each(function(){
+              if(mygraph.getNode(this.id).data == 'server'){
+                socket.emit('reverse_ip', {node_id: this.id})
+                picked++
+              }
+            })
+            if(!picked){ alert("Reverse IP: select one or more host (IP) nodes") }
+            $("#reverse_ip").trigger("blur")
+          })
+
           $("#copy_node_content").click(function(){
             export_list = ""
             selected = $(".selected").each(function(index){
@@ -1360,7 +1528,7 @@
                 url_string = "https://www.google.com/maps?q=" + this.id.split(":")[0] + "," + this.id.split(":")[1]
                 var win = window.open(url_string, '_blank');
                 return
-              }else if(mygraph.getNode(this.id).data == "info"){
+              }else if(mygraph.getNode(this.id).data == "info" || mygraph.getNode(this.id).data == "vuln"){
                 try{
                   url_regex = new RegExp('(https?://.+)','i')
                   url_string = url_regex.exec(this.id)[1]
@@ -1369,6 +1537,10 @@
                 }catch(err){
                   return
                 }
+              }else if(["web","dork","url"].indexOf(mygraph.getNode(this.id).data) > -1){
+                //these node ids are already full URLs (probed site, search, archived url)
+                var win = window.open(this.id, '_blank');
+                return
               }else{
                 host = this.id
                 if(host.match(/:80/)){
@@ -1383,7 +1555,7 @@
           })
 
           get_stats = function(){
-            stats = {"cidr": 0, "email": 0, "info": 0, "linkedin": 0, "mail": 0, "nameserver": 0, "network": 0, "organization": 0, "person": 0, "port": 0, "position": 0, "server": 0, "subdomain": 0, "txt": 0, "location": 0, "phone": 0, "credential": 0, "event": 0}
+            stats = {"cidr": 0, "email": 0, "info": 0, "linkedin": 0, "mail": 0, "nameserver": 0, "network": 0, "organization": 0, "person": 0, "port": 0, "position": 0, "server": 0, "subdomain": 0, "txt": 0, "location": 0, "phone": 0, "credential": 0, "event": 0, "web": 0, "dork": 0, "url": 0, "vuln": 0}
             mygraph.forEachNode(function(node){
               stats[node.data] += 1
             })
@@ -1850,7 +2022,9 @@
             organization: "Organization", linkedin: "LinkedIn Page", person: "Employee",
             position: "Position", email: "Email", credential: "Credential",
             event: "Breach Event", txt: "Text Record", location: "Location",
-            phone: "Phone Number", info: "General Info"
+            phone: "Phone Number", info: "General Info",
+            web: "Web Service", dork: "Dork / Search", url: "Archived URL",
+            vuln: "Finding"
           }
           //Node ids come from third party APIs, so cap what we paint into the DOM at once
           var MAX_LIST_ROWS = 1500
@@ -2088,15 +2262,23 @@
                     '<button id="detail_show_graph">Show in Graph</button>' +
                     '<button id="detail_copy">Copy ID</button></div>'
 
-            //Flare (or other) metadata attached to this node
+            //Metadata attached to this node (Flare breach data, HTTP probe results, ...)
             var meta = node_meta[node_id]
-            if(meta && Object.keys(meta).length){
-              html += '<div class="detail_group_head">Flare details</div><table class="meta_table">'
-              $.each(ordered_meta_keys(meta), function(index, key){
-                html += '<tr><td class="meta_k">' + esc(key) + '</td>' +
-                        '<td class="meta_v">' + esc(meta[key]) + '</td></tr>'
-              })
-              html += '</table>'
+            if(meta && meta.screenshot){
+              html += '<div class="detail_group_head">Screenshot</div>' +
+                      '<a href="' + esc(meta.screenshot) + '" target="_blank">' +
+                      '<img class="node_shot" src="' + esc(meta.screenshot) + '"></a>'
+            }
+            if(meta){
+              var meta_keys = ordered_meta_keys(meta)
+              if(meta_keys.length){
+                html += '<div class="detail_group_head">Details</div><table class="meta_table">'
+                $.each(meta_keys, function(index, key){
+                  html += '<tr><td class="meta_k">' + esc(key) + '</td>' +
+                          '<td class="meta_v">' + esc(meta[key]) + '</td></tr>'
+                })
+                html += '</table>'
+              }
             }
 
             var grouped = {}
@@ -2367,6 +2549,10 @@
   <span>Flare key:</span><input id="flare_api_key" type="password" value="Flare.io api key here" /><button id="flare_api_check">Status</button>
   <br>
   <span>Flare tenant:</span><input id="flare_tenant" type="text" placeholder="(optional) tenant id" />
+  <br>
+  <span>Google CSE:</span><input id="google_cse_key" type="password" value="Google API key here" /><input id="google_cse_cx" type="text" placeholder="cx / engine id" style="width:120px;" />
+  <br>
+  <span>GitHub token:</span><input id="github_token" type="password" value="GitHub token here" />
   <table id="options_table">
     <tr class="control benign" id="hide_settings"><td>Hide Settings</td><td>(h)(H)</td></tr>
     <tr ><td><b>Graph Operations:</b></td><td></td></tr>
@@ -2405,6 +2591,14 @@
     <tr class="control ratelimit" id="email_search"><td>Email Search (limit 50 queries/month)</td><td>(M)</td></tr>
     <tr class="control ratelimit" id="flare_credentials"><td>Flare Leaked Credentials (domain/email node)</td><td>(k)</td></tr>
     <tr class="control ratelimit" id="flare_events"><td>Flare Breach Events (domain/email node)</td><td>(j)</td></tr>
+    <tr class="control ratelimit" id="http_probe"><td>HTTP Probe + Screenshot (live web hosts)</td><td>(J)</td></tr>
+    <tr class="control benign" id="dork_generate"><td>Dork Generator (build searches, open with v)</td><td>(/)</td></tr>
+    <tr class="control ratelimit" id="dork_google"><td>Google Dork Search (needs CSE key)</td><td></td></tr>
+    <tr class="control ratelimit" id="dork_github"><td>GitHub Code Dork Search (needs token)</td><td></td></tr>
+    <tr class="control ratelimit" id="wayback_urls"><td>Wayback URLs (archived endpoints/subs)</td><td>(K)</td></tr>
+    <tr class="control ratelimit" id="subdomain_takeover"><td>Subdomain Takeover Check (dangling CNAME)</td><td>(,)</td></tr>
+    <tr class="control ratelimit" id="cloud_buckets"><td>Cloud Bucket Enumeration (S3/GCS/Azure)</td><td>(.)</td></tr>
+    <tr class="control ratelimit" id="reverse_ip"><td>Reverse IP / Shared Hosts (host node)</td><td>(;)</td></tr>
     <tr class="control ratelimit" id="location_search"><td>Location Search (general rate limit)</td><td>(L)</td></tr>
     <tr class="control ratelimit" id="zone_transfer"><td>DNS Zone Transfer</td><td>(Z)</td></tr>
     <tr class="control warning" id="bruteforce_subdomains"><td>Bruteforce Subdomains (interacts with client servers)</td><td>(b)</td></tr>
@@ -2474,6 +2668,22 @@
   <tr class="stat">
     <td><image width="15" height="15" src="/images/event"></image>  Breach Events:</td>
     <td id="event_tally">0</td>
+  </tr>
+  <tr class="stat">
+    <td><image width="15" height="15" src="/images/vuln"></image>  Findings:</td>
+    <td id="vuln_tally">0</td>
+  </tr>
+  <tr class="stat">
+    <td><image width="15" height="15" src="/images/web"></image>  Web Services:</td>
+    <td id="web_tally">0</td>
+  </tr>
+  <tr class="stat">
+    <td><image width="15" height="15" src="/images/url"></image>  Archived URLs:</td>
+    <td id="url_tally">0</td>
+  </tr>
+  <tr class="stat">
+    <td><image width="15" height="15" src="/images/dork"></image>  Dorks/Searches:</td>
+    <td id="dork_tally">0</td>
   </tr>
   <tr class="stat">
     <td><image width="15" height="15" src="/images/txt"></image>  Text Records:</td>
