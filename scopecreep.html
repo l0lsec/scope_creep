@@ -60,6 +60,22 @@
         box-shadow: 0 6px 22px var(--panel-shadow); padding: 10px 12px;
         backdrop-filter: blur(6px); font-size: 12px;
       }
+      /* Pin the settings panel to the window so every control is reachable
+         without zooming out. The API keys stay as a fixed header while the
+         feature list below them scrolls. top:30px is mirrored in max-height
+         to keep a small gap above and below. */
+      #settings {
+        max-height: calc(100vh - 40px);
+        box-sizing: border-box;
+        display: flex; flex-direction: column;
+        overflow: hidden;
+      }
+      #settings_keys { flex: 0 0 auto; }
+      #settings_menu {
+        flex: 1 1 auto; min-height: 0;
+        overflow-y: auto; overscroll-behavior: contain;
+        border-top: 1px solid var(--panel-border);
+      }
       #settings span { color: var(--muted); }
 
       /* ---------- Session queue panel ---------- */
@@ -2787,6 +2803,7 @@
 <button id="theme_toggle" title="Toggle light/dark theme" style="margin-left:6px;">🌙</button>
 <input id="search_field" type="text" value="Find Node (f)" style="position:absolute;right:0px;" />
 <div id="settings" style="position:absolute;left:0px;top:30px;">
+  <div id="settings_keys">
   <span>shodan key:</span><input id="shodan_api_key" type="password" value="Shodan api key here" />
   <br>
   <span>li_at cookie:</span><input id="linkedin_cookie" type="password" value="LinkedIn li_at cookie here" />
@@ -2804,6 +2821,8 @@
   <span>GitHub token:</span><input id="github_token" type="password" value="GitHub token here" />
   <br>
   <span>NVD key:</span><input id="nvd_api_key" type="password" placeholder="(optional) NVD API key — faster CVE lookups" />
+  </div>
+  <div id="settings_menu">
   <table id="options_table">
     <tr class="control benign" id="hide_settings"><td>Hide Settings</td><td>(h)(H)</td></tr>
     <tr ><td><b>Graph Operations:</b></td><td></td></tr>
@@ -2861,6 +2880,7 @@
     <tr class="control warning" id="bruteforce_subdomains"><td>Bruteforce Subdomains (interacts with client servers)</td><td>(b)</td></tr>
     <tr class="control warning" id="port_scan"><td>Port Scan/Port Scan ALL IPs</td><td>(p)(P)</td></tr>
   </table>
+  </div>
 </div>
 <div id="session_panel">
   <div class="sp_head">
