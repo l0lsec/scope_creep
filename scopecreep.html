@@ -412,6 +412,18 @@
 
           all_connections = {}
 
+          // Vivagraph binds its zoom handler to document.body (mousewheel /
+          // DOMMouseScroll, bubbling phase). Wheeling over a floating UI panel
+          // would otherwise bubble up and zoom the graph instead of scrolling
+          // the panel. Stop the wheel there — but don't preventDefault, so the
+          // panel still scrolls natively.
+          ['wheel', 'mousewheel', 'DOMMouseScroll'].forEach(function(evt){
+            ['settings', 'session_panel', 'stats_table'].forEach(function(id){
+              var el = document.getElementById(id)
+              if(el){ el.addEventListener(evt, function(e){ e.stopPropagation() }, false) }
+            })
+          })
+
           //Node-label visibility modes, cycled by the toolbar button (see #labels_toggle).
           //Declared up here so the cookie-restore below can call apply_labels_mode().
           var LABEL_MODES = ['off', 'all', 'selected']
