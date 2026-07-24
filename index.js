@@ -159,6 +159,10 @@ app.get('/images/vuln', function(req, res){
   res.sendFile(__dirname + '/images/vuln.svg');
 });
 
+app.get('/images/cve', function(req, res){
+  res.sendFile(__dirname + '/images/cve.svg');
+});
+
 // ---------- Flare API client (ported from flare-lookup-cli) ----------
 // Talks to https://api.flare.io: exchange an API key for a short-lived Bearer
 // token, then POST the global credentials/events search endpoints and follow
@@ -1580,6 +1584,49 @@ io.on('connection', function(socket){
     }).on('error', function(err){ io.emit('server_message', 'Reverse IP error: ' + err.message); });
   });
 
+  // CVE lookup: turn the HTTP-probe tech fingerprints on the selected node(s) into
+  // vulnerability leads. Parses product+version out of the server / x-powered-by /
+  // tech metadata and queries the NVD API. Version-inferred, so treat as leads.
+  socket.on('cve_lookup', function(query_object){
+    var nodes = (query_object && query_object.nodes) || [];
+    var apiKey = query_object && query_object.nvd_api_key;
+    if(!nodes.length){ return; }
+    var jobs = [], seen = {}, skipped = 0;
+    nodes.forEach(function(n){
+      parseProducts(n.meta || {}).forEach(function(p){
+        if(!p.version){ skipped++; return; }         // version-less searches are too noisy
+        var key = n.id + '|' + p.keyword;
+        if(seen[key]){ return; }
+        seen[key] = 1;
+        jobs.push({ keyword: p.keyword, display: p.display, parent: n.id });
+      });
+    });
+    if(!jobs.length){
+      io.emit('server_message', 'CVE lookup: no versioned products found on the selected node(s)' +
+        (skipped ? ' (' + skipped + ' version-less fingerprint(s) skipped)' : '') + '. Run HTTP Probe (J) first.');
+      return;
+    }
+    io.emit('server_message', 'CVE lookup started for ' + jobs.length + ' product(s)' + (apiKey ? '' : ' (no NVD key -> slow)') + '...');
+    var delay = apiKey ? 900 : 6500;   // respect NVD rate limits (50/30s keyed, 5/30s keyless)
+    var idx = 0, total = 0;
+    function next(){
+      if(idx >= jobs.length){ io.emit('server_message', 'CVE lookup complete: ' + total + ' CVE(s) added'); return; }
+      var job = jobs[idx++];
+      nvdLookup(job.keyword, apiKey, function(cves){
+        cves.forEach(function(cve){
+          io.emit('add_node', { id: cve.id + ' (CVSS ' + cve.score + ')', parent: job.parent, node_type: 'cve',
+            label: cve.id + ' — ' + cve.score + (cve.severity ? ' ' + cve.severity : ''),
+            meta: { cve: cve.id, cvss: String(cve.score), severity: cve.severity || '', product: job.display,
+                    published: cve.published || '', summary: cve.summary || '',
+                    url: 'https://nvd.nist.gov/vuln/detail/' + cve.id } });
+          total++;
+        });
+        setTimeout(next, delay);
+      });
+    }
+    next();
+  });
+
 });
 
 http.listen(3000, function(){
@@ -1927,4 +1974,69 @@ function checkBucket(name, seed, io, cb){
       });
     });
   });
+}
+
+// Pull { keyword, display, version } tuples out of a web node's fingerprint metadata.
+// Server / X-Powered-By headers carry versions ("nginx/1.18.0", "PHP/7.2.24"); the
+// tech field may carry a trailing version ("WordPress 6.1.1"). keyword is what we
+// hand to the CVE search (product name + version).
+function parseProducts(meta){
+  var out = [];
+  function add(name, version){
+    name = String(name || '').replace(/[()]/g, '').trim();
+    version = String(version || '').trim();
+    if(!name){ return; }
+    out.push({ keyword: (name + ' ' + version).trim(), display: name + (version ? '/' + version : ''), version: version });
+  }
+  function fromHeader(val){
+    // "nginx/1.18.0", "Apache/2.4.29 (Ubuntu)" -> first token, split on '/'
+    var first = String(val).split(/[ ;,]/)[0];
+    var parts = first.split('/');
+    add(parts[0], parts[1]);
+  }
+  if(meta.server){ fromHeader(meta.server); }
+  if(meta['x-powered-by']){ fromHeader(meta['x-powered-by']); }
+  if(meta.tech){
+    String(meta.tech).split(',').forEach(function(t){
+      t = t.trim();
+      if(!t){ return; }
+      var m = t.match(/^(.*?)[\s\/]v?(\d+(?:\.\d+)*)\s*$/);   // "WordPress 6.1.1"
+      if(m){ add(m[1], m[2]); } else { add(t, ''); }
+    });
+  }
+  return out;
+}
+
+// Query the NVD 2.0 API by keyword and return the top CVEs (by CVSS). cb(cveList).
+function nvdLookup(keyword, apiKey, cb){
+  var done = false;
+  function finish(list){ if(done){ return; } done = true; cb(list); }
+  var path = '/rest/json/cves/2.0?resultsPerPage=20&keywordSearch=' + encodeURIComponent(keyword);
+  var options = { host: 'services.nvd.nist.gov', path: path, method: 'GET', headers: { 'User-Agent': 'scope_creep' } };
+  if(apiKey){ options.headers['apiKey'] = apiKey; }
+  var req = https_resolver.request(options, function(resp){
+    var data = '';
+    resp.on('data', function(c){ data += c; });
+    resp.on('end', function(){
+      var cves = [];
+      try {
+        var r = JSON.parse(data);
+        (r && r.vulnerabilities || []).forEach(function(v){
+          var c = v.cve || {};
+          var m = c.metrics || {};
+          var pick = (m.cvssMetricV31 && m.cvssMetricV31[0]) || (m.cvssMetricV30 && m.cvssMetricV30[0]) || (m.cvssMetricV2 && m.cvssMetricV2[0]);
+          var score = '?', sev = '';
+          if(pick && pick.cvssData){ score = pick.cvssData.baseScore; sev = pick.cvssData.baseSeverity || pick.baseSeverity || ''; }
+          var desc = '';
+          (c.descriptions || []).forEach(function(d){ if(d.lang === 'en' && !desc){ desc = d.value; } });
+          if(c.id){ cves.push({ id: c.id, score: score, severity: sev, summary: (desc || '').slice(0, 300), published: String(c.published || '').slice(0, 10) }); }
+        });
+      } catch(e){}
+      cves.sort(function(a, b){ return (parseFloat(b.score) || 0) - (parseFloat(a.score) || 0); });
+      finish(cves.slice(0, 8));
+    });
+  });
+  req.on('error', function(){ finish([]); });
+  req.setTimeout(20000, function(){ req.destroy(); finish([]); });
+  req.end();
 }

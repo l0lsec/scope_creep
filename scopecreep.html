@@ -246,6 +246,7 @@
       td.c_icon { width: 20px; }
       td.c_icon img { width: 16px; height: 16px; display: block; }
       td.c_name { word-break: break-all; }
+      td.c_identity { color: var(--muted); word-break: break-all; }
       td.c_type { color: var(--muted); white-space: nowrap; }
       td.c_deg { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
       td.c_rel { white-space: nowrap; }
@@ -428,6 +429,9 @@
             if($.cookie('github_token_cookie') !== ""){
               $("#github_token").val($.cookie('github_token_cookie'))
             }
+            if($.cookie('nvd_api_key_cookie') !== ""){
+              $("#nvd_api_key").val($.cookie('nvd_api_key_cookie'))
+            }
             if($.cookie('port_list') !== ""){
               $("#port_list").val($.cookie('port_list'))
             }
@@ -514,6 +518,10 @@
 
           $("#github_token").focusout(function(){
             document.cookie = "github_token_cookie=" + $("#github_token").val()
+          })
+
+          $("#nvd_api_key").focusout(function(){
+            document.cookie = "nvd_api_key_cookie=" + $("#nvd_api_key").val()
           })
 
           $("#port_list").focusout(function(){
@@ -1316,6 +1324,25 @@
             $("#reverse_ip").trigger("blur")
           })
 
+          // CVE lookup: send the tech/version fingerprints of the selected web nodes
+          // to the server for an NVD search. Only the 3 relevant meta fields are sent
+          // (never the screenshot data URI).
+          $("#cve_lookup").click(function(){
+            var nodes = []
+            $(".selected").each(function(){
+              var m = node_meta[this.id]
+              if(m && (m.server || m['x-powered-by'] || m.tech)){
+                nodes.push({id: this.id, meta: {server: m.server || '', 'x-powered-by': m['x-powered-by'] || '', tech: m.tech || ''}})
+              }
+            })
+            if(!nodes.length){
+              alert("CVE Lookup: select web-service node(s) that carry tech/version info (run HTTP Probe (J) first)")
+            }else{
+              socket.emit('cve_lookup', {nodes: nodes, nvd_api_key: $("#nvd_api_key").val()})
+            }
+            $("#cve_lookup").trigger("blur")
+          })
+
           $("#copy_node_content").click(function(){
             export_list = ""
             selected = $(".selected").each(function(index){
@@ -1359,6 +1386,192 @@
             }
             socket.emit('export_graph', query_object)
             $("#export_graph").trigger("blur")
+          })
+
+          // ================================================================
+          //  Recon Report
+          //  Walks the live graph (mygraph + node_meta + node_labels) and
+          //  produces a self-contained, findings-first HTML deliverable, plus
+          //  a findings/CVE CSV for tooling. Everything is generated in the
+          //  browser and downloaded via a Blob -- no server round-trip.
+          // ================================================================
+          function report_escape(s){
+            return String(s == null ? '' : s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                     .replace(/>/g, "&gt;").replace(/"/g, "&quot;")
+          }
+
+          function download_file(filename, content, mime){
+            var blob = new Blob([content], {type: mime || 'text/plain'})
+            var a = document.createElement('a')
+            a.href = URL.createObjectURL(blob)
+            a.download = filename
+            document.body.appendChild(a)
+            a.click()
+            setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(a.href) }, 200)
+          }
+
+          function report_nodes_by_type(){
+            var byType = {}
+            mygraph.forEachNode(function(n){ (byType[n.data] = byType[n.data] || []).push(n.id) })
+            return byType
+          }
+
+          function report_session_name(){
+            try {
+              var idx = JSON.parse(localStorage.getItem('scopecreep_session_index')) || []
+              var act = localStorage.getItem('scopecreep_active_session')
+              var f = idx.filter(function(s){ return s.id === act })[0]
+              return f ? f.name : ''
+            } catch(e){ return '' }
+          }
+
+          //A findings / CVE row-set as CSV (the actionable, trackable items).
+          function findings_csv(){
+            function q(s){ return '"' + String(s == null ? '' : s).replace(/"/g, '""') + '"' }
+            var rows = [['type','label','a','b','c','url'].join(',')]
+            mygraph.forEachNode(function(n){
+              var m = node_meta[n.id] || {}
+              if(n.data === 'vuln'){
+                rows.push([q('finding'), q(node_labels[n.id] || n.id), q(m.service || m.provider || ''),
+                           q(m.confidence || m.access || ''), q(m.host || m.bucket || ''), q(m.url || '')].join(','))
+              } else if(n.data === 'cve'){
+                rows.push([q('cve'), q(m.cve || n.id), q(m.cvss || ''), q(m.severity || ''),
+                           q(m.product || ''), q(m.url || '')].join(','))
+              }
+            })
+            return rows.join('\n')
+          }
+
+          var REPORT_CSS =
+            "*{box-sizing:border-box}body{font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a;background:#fff;margin:0;padding:32px;max-width:1000px}" +
+            "h1{font-size:24px;margin:0 0 2px}h2{font-size:18px;margin:28px 0 8px;padding-bottom:4px;border-bottom:2px solid #e2e2e2}h3{font-size:14px;margin:12px 0 4px}" +
+            ".sub{color:#666;margin:0 0 12px}.scope{background:#f5f7fa;border:1px solid #e2e6ea;border-radius:6px;padding:8px 12px}" +
+            "table{border-collapse:collapse;width:100%;margin:6px 0}td,th{border:1px solid #e2e2e2;padding:5px 9px;text-align:left;vertical-align:top;word-break:break-word}th{background:#f5f7fa}" +
+            "table.sum{width:auto}table.sum td:last-child{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}" +
+            ".finding{border-left:4px solid #E74C3C;background:#fdf3f2;padding:6px 12px;margin:8px 0;border-radius:0 6px 6px 0}.finding h3{color:#c0392b}" +
+            "table.meta td.k{color:#666;white-space:nowrap;width:1%}" +
+            ".web{border:1px solid #e2e6ea;border-radius:6px;padding:10px 12px;margin:10px 0}.webmeta span{display:inline-block;margin:0 12px 4px 0;color:#333}.shot{max-width:100%;border:1px solid #ccc;border-radius:4px;margin-top:6px}" +
+            ".mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:#333;background:#f7f7f7;border:1px solid #eee;border-radius:4px;padding:8px}" +
+            ".none{color:#888;font-style:italic}.foot{margin-top:32px;color:#999;font-size:12px;border-top:1px solid #e2e2e2;padding-top:8px}a{color:#2669d6}"
+
+          function report_html(){
+            var byType = report_nodes_by_type()
+            var cnt = function(t){ return (byType[t] || []).length }
+            var e = report_escape
+            var stamp = new Date().toString()
+            var sess = report_session_name()
+            var roots = (byType['network'] || []).slice(0, 50)
+            var h = []
+            h.push('<!doctype html><html><head><meta charset="utf-8"><title>Scope Creep Report' + (sess ? ' - ' + e(sess) : '') + '</title><style>' + REPORT_CSS + '</style></head><body>')
+            h.push('<h1>Scope Creep Recon Report</h1>')
+            h.push('<p class="sub">' + (sess ? e(sess) + ' &middot; ' : '') + e(stamp) + '</p>')
+            if(roots.length){ h.push('<p class="scope"><b>Scope (root domains):</b> ' + roots.map(e).join(', ') + '</p>') }
+
+            h.push('<h2>Summary</h2><table class="sum">')
+            ;[['Findings','vuln'],['Potential CVEs','cve'],['Domains','network'],['Subdomains','subdomain'],
+              ['Hosts','server'],['Web Services','web'],['Open Ports','port'],['Credentials','credential'],
+              ['Breach Events','event'],['Emails','email'],['Employees','person'],['Archived URLs','url']].forEach(function(p){
+              if(cnt(p[1])){ h.push('<tr><td>' + p[0] + '</td><td>' + cnt(p[1]) + '</td></tr>') }
+            })
+            h.push('</table>')
+
+            var findings = byType['vuln'] || []
+            h.push('<h2>Findings (' + findings.length + ')</h2>')
+            if(!findings.length){ h.push('<p class="none">No findings recorded.</p>') }
+            findings.forEach(function(id){
+              var m = node_meta[id] || {}
+              h.push('<div class="finding"><h3>' + e(node_labels[id] || id) + '</h3>')
+              var keys = ordered_meta_keys(m)
+              if(keys.length){
+                h.push('<table class="meta">')
+                keys.forEach(function(k){ h.push('<tr><td class="k">' + e(k) + '</td><td>' + e(m[k]) + '</td></tr>') })
+                h.push('</table>')
+              }
+              h.push('</div>')
+            })
+
+            var cves = byType['cve'] || []
+            if(cves.length){
+              h.push('<h2>Potential CVEs (' + cves.length + ')</h2>')
+              h.push('<p class="none">Version-inferred from banners &mdash; verify before reporting; a version may be back-patched.</p>')
+              h.push('<table class="cve"><thead><tr><th>CVE</th><th>CVSS</th><th>Product</th><th>Summary</th></tr></thead><tbody>')
+              cves.forEach(function(id){
+                var m = node_meta[id] || {}
+                h.push('<tr><td><a href="' + e(m.url || '#') + '">' + e(m.cve || id) + '</a></td><td>' + e((m.cvss || '') + ' ' + (m.severity || '')) + '</td><td>' + e(m.product || '') + '</td><td>' + e(m.summary || '') + '</td></tr>')
+              })
+              h.push('</tbody></table>')
+            }
+
+            var webs = byType['web'] || []
+            if(webs.length){
+              h.push('<h2>Attack Surface &mdash; Web Services (' + webs.length + ')</h2>')
+              webs.forEach(function(id){
+                var m = node_meta[id] || {}
+                h.push('<div class="web"><h3>' + e(node_labels[id] || id) + '</h3><div class="webmeta">')
+                ;['status','title','server','x-powered-by','ip','tech','url'].forEach(function(k){ if(m[k]){ h.push('<span><b>' + e(k) + ':</b> ' + e(m[k]) + '</span>') } })
+                h.push('</div>')
+                if(m.screenshot){ h.push('<img class="shot" src="' + e(m.screenshot) + '">') }
+                h.push('</div>')
+              })
+            }
+
+            var ports = byType['port'] || []
+            if(ports.length){ h.push('<h2>Open Ports (' + ports.length + ')</h2><div class="mono">' + ports.map(e).join('<br>') + '</div>') }
+
+            var creds = byType['credential'] || []
+            if(creds.length){
+              h.push('<h2>Exposure &mdash; Leaked Credentials (' + creds.length + ')</h2>')
+              h.push('<table class="cred"><thead><tr><th>Identity</th><th>Secret</th></tr></thead><tbody>')
+              creds.forEach(function(id){
+                var sep = id.indexOf(' : ')
+                h.push('<tr><td>' + e(sep === -1 ? '' : id.slice(0, sep)) + '</td><td class="mono">' + e(sep === -1 ? id : id.slice(sep + 3)) + '</td></tr>')
+              })
+              h.push('</tbody></table>')
+            }
+
+            var events = byType['event'] || []
+            if(events.length){
+              h.push('<h2>Exposure &mdash; Breach Events (' + events.length + ')</h2>')
+              events.forEach(function(id){
+                var m = node_meta[id] || {}
+                var inline = ordered_meta_keys(m).map(function(k){ return e(k) + ': ' + e(m[k]) }).join(' &middot; ')
+                h.push('<div class="web"><b>' + e(node_labels[id] || id) + '</b><div class="webmeta">' + inline + '</div></div>')
+              })
+            }
+
+            h.push('<h2>Assets</h2>')
+            ;[['Domains','network'],['Subdomains','subdomain'],['Hosts','server'],['Ranges','cidr'],
+              ['Name Servers','nameserver'],['Mail Servers','mail'],['Organizations','organization']].forEach(function(p){
+              var list = byType[p[1]] || []
+              if(list.length){ h.push('<h3>' + p[0] + ' (' + list.length + ')</h3><div class="mono">' + list.slice(0, 2000).map(e).join('<br>') + '</div>') }
+            })
+
+            var emails = byType['email'] || []
+            if(emails.length){ h.push('<h2>People / Emails (' + emails.length + ')</h2><div class="mono">' + emails.slice(0, 2000).map(e).join('<br>') + '</div>') }
+
+            h.push('<p class="foot">Generated by Scope Creep &middot; ' + e(stamp) + '</p></body></html>')
+            return h.join('\n')
+          }
+
+          function do_report(){
+            var stamp = new Date().toISOString().slice(0, 10)
+            download_file('scopecreep_report_' + stamp + '.html', report_html(), 'text/html')
+          }
+
+          $("#report_button").click(function(){ do_report(); $("#report_button").trigger("blur") })
+          $("#generate_report").click(function(){ do_report() })
+          $("#export_findings_csv").click(function(){
+            download_file('scopecreep_findings_' + new Date().toISOString().slice(0, 10) + '.csv', findings_csv(), 'text/csv')
+          })
+          $("#select_findings").click(function(){
+            $(".node").attr("class", "node").attr("fill", "black")
+            mygraph.forEachNode(function(n){
+              if(n.data === 'vuln' || n.data === 'cve'){
+                var el = document.getElementById(n.id)
+                if(el){ el.setAttribute('class', 'node selected'); el.setAttribute('fill', 'green') }
+              }
+            })
+            if(typeof render_list === 'function' && list_state.open){ render_list() }
           })
 
           $("#open_file").click(function(){
@@ -1541,6 +1754,11 @@
                 //these node ids are already full URLs (probed site, search, archived url)
                 var win = window.open(this.id, '_blank');
                 return
+              }else if(mygraph.getNode(this.id).data == "cve"){
+                var cve_meta = node_meta[this.id]
+                var cve_id = (this.id.match(/CVE-\d{4}-\d+/) || [])[0]
+                var win = window.open((cve_meta && cve_meta.url) || ('https://nvd.nist.gov/vuln/detail/' + (cve_id || '')), '_blank');
+                return
               }else{
                 host = this.id
                 if(host.match(/:80/)){
@@ -1555,7 +1773,7 @@
           })
 
           get_stats = function(){
-            stats = {"cidr": 0, "email": 0, "info": 0, "linkedin": 0, "mail": 0, "nameserver": 0, "network": 0, "organization": 0, "person": 0, "port": 0, "position": 0, "server": 0, "subdomain": 0, "txt": 0, "location": 0, "phone": 0, "credential": 0, "event": 0, "web": 0, "dork": 0, "url": 0, "vuln": 0}
+            stats = {"cidr": 0, "email": 0, "info": 0, "linkedin": 0, "mail": 0, "nameserver": 0, "network": 0, "organization": 0, "person": 0, "port": 0, "position": 0, "server": 0, "subdomain": 0, "txt": 0, "location": 0, "phone": 0, "credential": 0, "event": 0, "web": 0, "dork": 0, "url": 0, "vuln": 0, "cve": 0}
             mygraph.forEachNode(function(node){
               stats[node.data] += 1
             })
@@ -2024,7 +2242,7 @@
             event: "Breach Event", txt: "Text Record", location: "Location",
             phone: "Phone Number", info: "General Info",
             web: "Web Service", dork: "Dork / Search", url: "Archived URL",
-            vuln: "Finding"
+            vuln: "Finding", cve: "Potential CVE"
           }
           //Node ids come from third party APIs, so cap what we paint into the DOM at once
           var MAX_LIST_ROWS = 1500
@@ -2050,6 +2268,15 @@
           function display_name(node_id){
             var node = mygraph.getNode(node_id)
             return label_for({id: node_id, data: node ? node.data : ''})
+          }
+
+          //A credential id is "identity : secret"; the identity is the prefix (its
+          //owner). Empty for every other node type. Used for the List View column.
+          function credential_identity(node_id){
+            var node = mygraph.getNode(node_id)
+            if(!node || node.data !== 'credential'){ return '' }
+            var sep = node_id.indexOf(' : ')
+            return sep === -1 ? '' : node_id.slice(0, sep)
           }
 
           // ---------- selection is shared with the graph ----------
@@ -2201,7 +2428,7 @@
             if(list_state.rows.length === 0){
               html = '<div class="list_note">No nodes match the current filter.</div>'
             }else{
-              html = '<table id="node_table"><thead><tr><th></th><th>Name</th><th>Type</th>' +
+              html = '<table id="node_table"><thead><tr><th></th><th>Name</th><th>Identity</th><th>Type</th>' +
                      '<th>Links</th><th>Connected To</th></tr></thead><tbody>'
               for(var i = 0; i < shown; i++){
                 var row = list_state.rows[i]
@@ -2211,6 +2438,7 @@
                 html += '<tr class="' + row_class + '" data-id="' + esc(row.id) + '">' +
                         '<td class="c_icon">' + type_icon(row.type, 16) + '</td>' +
                         '<td class="c_name">' + esc(display_name(row.id)) + '</td>' +
+                        '<td class="c_identity">' + esc(credential_identity(row.id)) + '</td>' +
                         '<td class="c_type">' + esc(type_label(row.type)) + '</td>' +
                         '<td class="c_deg">' + row.degree + '</td>' +
                         '<td class="c_rel">' + rel_summary(row.counts) + '</td></tr>'
@@ -2534,6 +2762,7 @@
 </label><span id="safety_label">"Safety" Mode ON</span>
 <button id="list_view_button" title="Switch to list view (z)" style="margin-left:10px;">☰ List View</button>
 <button id="sessions_button" title="Saved sessions — recover or switch your recon work" style="margin-left:6px;">⧉ Sessions</button>
+<button id="report_button" title="Generate a recon report: findings, attack surface, exposure, and assets" style="margin-left:6px;">📄 Report</button>
 <button id="labels_toggle" title="Cycle node labels: off / all / selected only" style="margin-left:6px;">🏷️ Labels Off</button>
 <button id="theme_toggle" title="Toggle light/dark theme" style="margin-left:6px;">🌙</button>
 <input id="search_field" type="text" value="Find Node (f)" style="position:absolute;right:0px;" />
@@ -2553,6 +2782,8 @@
   <span>Google CSE:</span><input id="google_cse_key" type="password" value="Google API key here" /><input id="google_cse_cx" type="text" placeholder="cx / engine id" style="width:120px;" />
   <br>
   <span>GitHub token:</span><input id="github_token" type="password" value="GitHub token here" />
+  <br>
+  <span>NVD key:</span><input id="nvd_api_key" type="password" placeholder="(optional) NVD API key — faster CVE lookups" />
   <table id="options_table">
     <tr class="control benign" id="hide_settings"><td>Hide Settings</td><td>(h)(H)</td></tr>
     <tr ><td><b>Graph Operations:</b></td><td></td></tr>
@@ -2562,6 +2793,9 @@
     <tr class="control benign" id="copy_node_content"><td>Copy Nodes to Clipboard</td><td>(y)</td></tr>
     <tr class="control benign" id="select_first_connections"><td>Select First Connections</td><td>(UP Arrow)</td></tr>
     <tr class="control benign" id="export_graph"><td>Export Nodes/Graph</td><td>(e)(E)</td></tr>
+    <tr class="control benign" id="generate_report"><td>Generate Recon Report (HTML)</td><td>(📄)</td></tr>
+    <tr class="control benign" id="export_findings_csv"><td>Export Findings + CVEs (CSV)</td><td></td></tr>
+    <tr class="control benign" id="select_findings"><td>Select All Findings + CVEs</td><td></td></tr>
     <tr class="control benign" id="select_orphans"><td>Select nodes based on # of connections</td><td>(0-9)</td></tr>
     <tr class="control ratelimit" id="open_file"><td>Open Scope File</td><td>(o)</td></tr>
     <tr class="control ratelimit" id="open_graph"><td>Open Graph</td><td>(O)</td></tr>
@@ -2599,6 +2833,7 @@
     <tr class="control ratelimit" id="subdomain_takeover"><td>Subdomain Takeover Check (dangling CNAME)</td><td>(,)</td></tr>
     <tr class="control ratelimit" id="cloud_buckets"><td>Cloud Bucket Enumeration (S3/GCS/Azure)</td><td>(.)</td></tr>
     <tr class="control ratelimit" id="reverse_ip"><td>Reverse IP / Shared Hosts (host node)</td><td>(;)</td></tr>
+    <tr class="control ratelimit" id="cve_lookup"><td>CVE Lookup (probed tech &rarr; known CVEs)</td><td></td></tr>
     <tr class="control ratelimit" id="location_search"><td>Location Search (general rate limit)</td><td>(L)</td></tr>
     <tr class="control ratelimit" id="zone_transfer"><td>DNS Zone Transfer</td><td>(Z)</td></tr>
     <tr class="control warning" id="bruteforce_subdomains"><td>Bruteforce Subdomains (interacts with client servers)</td><td>(b)</td></tr>
@@ -2672,6 +2907,10 @@
   <tr class="stat">
     <td><image width="15" height="15" src="/images/vuln"></image>  Findings:</td>
     <td id="vuln_tally">0</td>
+  </tr>
+  <tr class="stat">
+    <td><image width="15" height="15" src="/images/cve"></image>  Potential CVEs:</td>
+    <td id="cve_tally">0</td>
   </tr>
   <tr class="stat">
     <td><image width="15" height="15" src="/images/web"></image>  Web Services:</td>
