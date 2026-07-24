@@ -143,6 +143,22 @@ app.get('/images/event', function(req, res){
   res.sendFile(__dirname + '/images/event.svg');
 });
 
+app.get('/images/web', function(req, res){
+  res.sendFile(__dirname + '/images/web.svg');
+});
+
+app.get('/images/dork', function(req, res){
+  res.sendFile(__dirname + '/images/dork.svg');
+});
+
+app.get('/images/url', function(req, res){
+  res.sendFile(__dirname + '/images/url.svg');
+});
+
+app.get('/images/vuln', function(req, res){
+  res.sendFile(__dirname + '/images/vuln.svg');
+});
+
 // ---------- Flare API client (ported from flare-lookup-cli) ----------
 // Talks to https://api.flare.io: exchange an API key for a short-lived Bearer
 // token, then POST the global credentials/events search endpoints and follow
@@ -1367,6 +1383,203 @@ io.on('connection', function(socket){
     });
   });
 
+  // HTTP probe + screenshot: visit the selected hosts with a headless browser and
+  // report status/title/tech/server + a thumbnail so a wall of subdomains can be
+  // triaged as a real attack surface. Runs one browser for the whole batch.
+  socket.on('http_probe', function(query_object){
+    httpProbe(query_object, io);
+  });
+
+  // Wayback URLs: pull archived endpoints for a domain from the archive.org CDX
+  // API. Surfaces forgotten paths/params and doubles as a subdomain source.
+  socket.on('wayback_urls', function(query_object){
+    var domain = query_object && query_object.node_id;
+    if(!domain){ return; }
+    var limit = parseInt(query_object.limit, 10);
+    if(!limit || limit < 1){ limit = 500; }
+    if(limit > 5000){ limit = 5000; }
+    var api = 'http://web.archive.org/cdx/search/cdx?url=' + encodeURIComponent(domain) +
+              '&matchType=domain&fl=original&collapse=urlkey&output=json&limit=' + limit;
+    http_resolver.get(api, function(resp){
+      var data = '';
+      resp.on('data', function(chunk){ data += chunk; });
+      resp.on('end', function(){
+        var rows;
+        try { rows = JSON.parse(data); } catch(e){ io.emit('server_message', 'Wayback: could not parse response'); return; }
+        if(!Array.isArray(rows) || rows.length < 2){ io.emit('server_message', 'Wayback: no archived URLs for ' + domain); return; }
+        var seenUrl = {}, seenHost = {}, count = 0;
+        for(var i = 1; i < rows.length; i++){
+          var original = Array.isArray(rows[i]) ? rows[i][0] : rows[i];
+          if(!original || seenUrl[original]){ continue; }
+          seenUrl[original] = 1;
+          var host = '';
+          try { host = new URL(original).hostname.toLowerCase(); } catch(e){ host = ''; }
+          var parent = domain;
+          if(host && host !== domain && host.slice(-(domain.length + 1)) === '.' + domain){
+            if(!seenHost[host]){
+              seenHost[host] = 1;
+              io.emit('add_node', { id: host, parent: domain, node_type: 'subdomain' });
+            }
+            parent = host;
+          }
+          io.emit('add_node', { id: original, parent: parent, node_type: 'url' });
+          count++;
+        }
+        io.emit('server_message', 'Wayback: added ' + count + ' archived URLs for ' + domain);
+      });
+    }).on('error', function(err){ io.emit('server_message', 'Wayback error: ' + err.message); });
+  });
+
+  // Google dork search: run a set of sensitive-exposure dorks through the Google
+  // Programmable Search JSON API. Results attach as web nodes under a dork node.
+  socket.on('dork_google', function(query_object){
+    var target = query_object && query_object.node_id;
+    var key = query_object && query_object.google_key;
+    var cx = query_object && query_object.google_cx;
+    if(!target){ return; }
+    if(!key || !cx){ io.emit('server_message', 'Google dork: set a Google CSE key and cx in settings'); return; }
+    var dorks = googleDorkList(target);
+    var idx = 0;
+    function runNext(){
+      if(idx >= dorks.length){ return; }
+      var d = dorks[idx++];
+      var api = 'https://www.googleapis.com/customsearch/v1?key=' + encodeURIComponent(key) +
+                '&cx=' + encodeURIComponent(cx) + '&num=10&q=' + encodeURIComponent(d.q);
+      https_resolver.get(api, function(resp){
+        var data = '';
+        resp.on('data', function(chunk){ data += chunk; });
+        resp.on('end', function(){
+          var r;
+          try { r = JSON.parse(data); } catch(e){ setTimeout(runNext, 400); return; }
+          if(r && r.error){ io.emit('server_message', 'Google dork: ' + (r.error.message || 'API error')); return; }
+          var items = (r && r.items) || [];
+          if(items.length){
+            var dorkId = 'google: ' + d.label + ' (' + target + ')';
+            io.emit('add_node', { id: dorkId, parent: target, node_type: 'dork', meta: { query: d.q, results: String(items.length) } });
+            items.forEach(function(it){
+              io.emit('add_node', { id: it.link, parent: dorkId, node_type: 'web',
+                label: (it.title || it.link).slice(0, 80),
+                meta: { title: (it.title || '').slice(0, 200), snippet: (it.snippet || '').slice(0, 300), dork: d.label } });
+            });
+          }
+          setTimeout(runNext, 400);
+        });
+      }).on('error', function(){ setTimeout(runNext, 400); });
+    }
+    runNext();
+  });
+
+  // GitHub code dork search: hunt public repos for leaked hostnames/secrets tied
+  // to the target. Code search requires an authenticated token. Hits attach as
+  // info nodes under a dork node. Spaced out to respect the 10 req/min limit.
+  socket.on('dork_github', function(query_object){
+    var target = query_object && query_object.node_id;
+    var token = query_object && query_object.github_token;
+    if(!target){ return; }
+    if(!token){ io.emit('server_message', 'GitHub dork: set a GitHub token in settings (code search requires auth)'); return; }
+    var dorks = githubDorkList(target);
+    var idx = 0;
+    function runNext(){
+      if(idx >= dorks.length){ return; }
+      var d = dorks[idx++];
+      var options = {
+        host: 'api.github.com',
+        path: '/search/code?per_page=10&q=' + encodeURIComponent(d.q),
+        method: 'GET',
+        headers: { 'Authorization': 'token ' + token, 'User-Agent': 'scope_creep', 'Accept': 'application/vnd.github.v3+json' }
+      };
+      var req = https_resolver.request(options, function(resp){
+        var data = '';
+        resp.on('data', function(chunk){ data += chunk; });
+        resp.on('end', function(){
+          var r;
+          try { r = JSON.parse(data); } catch(e){ setTimeout(runNext, 7000); return; }
+          if(r && r.message && !r.items){ io.emit('server_message', 'GitHub dork: ' + r.message); return; }
+          var items = (r && r.items) || [];
+          if(items.length){
+            var dorkId = 'github: ' + d.label + ' (' + target + ')';
+            io.emit('add_node', { id: dorkId, parent: target, node_type: 'dork', meta: { query: d.q, results: String(r.total_count || items.length) } });
+            items.forEach(function(it){
+              var repo = it.repository ? it.repository.full_name : '';
+              io.emit('add_node', { id: it.html_url, parent: dorkId, node_type: 'info',
+                label: (repo + ' — ' + (it.path || '')).slice(0, 90),
+                meta: { repo: repo, path: it.path || '', url: it.html_url } });
+            });
+          }
+          setTimeout(runNext, 7000);
+        });
+      });
+      req.on('error', function(){ setTimeout(runNext, 7000); });
+      req.end();
+    }
+    runNext();
+  });
+
+  // Subdomain takeover check: resolve each selected host's CNAME, fetch the live
+  // page, and flag it when the response carries the "unclaimed resource" signature
+  // of a known SaaS/cloud provider (a dangling CNAME you may be able to claim).
+  socket.on('subdomain_takeover', function(query_object){
+    var hosts = (query_object && query_object.hosts) || [];
+    if(!hosts.length){ return; }
+    io.emit('server_message', 'Takeover check started on ' + hosts.length + ' host(s)...');
+    var pending = hosts.length, hits = 0;
+    function oneDone(hit){
+      if(hit){ hits++; }
+      if(--pending <= 0){ io.emit('server_message', 'Takeover check complete: ' + hits + ' potential issue(s) found'); }
+    }
+    hosts.forEach(function(host){
+      dns.resolveCname(host, function(err, cnames){
+        checkTakeover(host, cnames || [], io, oneDone);
+      });
+    });
+  });
+
+  // Cloud bucket enumeration: derive a base keyword from the selected domain/org,
+  // generate name permutations, and probe AWS S3, Google GCS, and Azure Blob.
+  // Public/listable buckets become findings; existing-but-private ones become info.
+  socket.on('cloud_buckets', function(query_object){
+    var seed = query_object && query_object.node_id;
+    if(!seed){ return; }
+    var names = bucketCandidates(seed);
+    io.emit('server_message', 'Cloud bucket scan started (' + names.length + ' candidate names)...');
+    var idx = 0, found = 0;
+    function next(){
+      if(idx >= names.length){
+        io.emit('server_message', 'Cloud bucket scan complete: ' + found + ' bucket(s)/account(s) found');
+        return;
+      }
+      var name = names[idx++];
+      checkBucket(name, seed, io, function(hit){ if(hit){ found++; } setTimeout(next, 120); });
+    }
+    next();
+  });
+
+  // Reverse IP / shared-host discovery: find other domains served from the same IP
+  // (virtual hosts) via the hackertarget reverse-IP API. Great for shared hosting.
+  socket.on('reverse_ip', function(query_object){
+    var ip = query_object && query_object.node_id;
+    if(!ip){ return; }
+    https_resolver.get('https://api.hackertarget.com/reverseiplookup/?q=' + encodeURIComponent(ip), function(resp){
+      var data = '';
+      resp.on('data', function(chunk){ data += chunk; });
+      resp.on('end', function(){
+        if(!data || /error|API count exceeded|no records/i.test(data)){
+          io.emit('server_message', 'Reverse IP: ' + (data ? data.split('\n')[0] : 'no data') + ' (' + ip + ')');
+          return;
+        }
+        var lines = data.split('\n'), count = 0;
+        lines.forEach(function(h){
+          h = h.trim().toLowerCase();
+          if(!h){ return; }
+          var nt = h.split('.').length > 2 ? 'subdomain' : 'network';
+          io.emit('add_node', { id: h, parent: ip, node_type: nt });
+          count++;
+        });
+        io.emit('server_message', 'Reverse IP: ' + count + ' host(s) sharing ' + ip);
+      });
+    }).on('error', function(err){ io.emit('server_message', 'Reverse IP error: ' + err.message); });
+  });
+
 });
 
 http.listen(3000, function(){
@@ -1457,4 +1670,261 @@ async function linkedinMiner(parent_node, io, linkedin_cookie, org_id, start_pag
 
   browser.close();
 
+}
+
+// Sensitive-exposure dorks for the Google Programmable Search API. Kept tight and
+// high-signal: documents, configs/backups, directory listings, auth surfaces, and
+// secrets leaking into indexed pages.
+function googleDorkList(target){
+  var s = 'site:' + target + ' ';
+  return [
+    { label: 'Documents',          q: s + '(filetype:pdf OR filetype:doc OR filetype:docx OR filetype:xls OR filetype:xlsx OR filetype:ppt OR filetype:pptx)' },
+    { label: 'Config & backups',   q: s + '(ext:env OR ext:ini OR ext:conf OR ext:cfg OR ext:yml OR ext:bak OR ext:old OR ext:sql OR ext:log)' },
+    { label: 'Directory listings', q: s + 'intitle:"index of"' },
+    { label: 'Login & admin',      q: s + '(inurl:admin OR inurl:login OR intitle:login OR inurl:portal)' },
+    { label: 'Secrets in pages',   q: s + '("api_key" OR "apikey" OR "authorization: bearer" OR "BEGIN RSA PRIVATE KEY" OR "aws_secret")' }
+  ];
+}
+
+// GitHub code-search dorks for leaked hostnames/secrets tied to the target domain.
+function githubDorkList(domain){
+  return [
+    { label: 'Domain mentions', q: '"' + domain + '"' },
+    { label: 'Secrets near host', q: '"' + domain + '" (password OR secret OR api_key OR token)' },
+    { label: 'Env files', q: '"' + domain + '" filename:.env' },
+    { label: 'Config files', q: '"' + domain + '" (filename:config OR extension:yml OR extension:conf)' }
+  ];
+}
+
+// Best-effort client-side technology fingerprint from the loaded page.
+async function sniffTech(page){
+  try {
+    return await page.evaluate(function(){
+      var t = [];
+      var g = document.querySelector('meta[name="generator"]');
+      if(g && g.content){ t.push(g.content); }
+      if(window.wp || document.querySelector('link[href*="wp-content"],script[src*="wp-content"]')){ t.push('WordPress'); }
+      if(window.Drupal){ t.push('Drupal'); }
+      if(window.Joomla){ t.push('Joomla'); }
+      if(window.Shopify){ t.push('Shopify'); }
+      if(window.React || document.querySelector('[data-reactroot],#__next')){ t.push('React'); }
+      if(window.angular || document.querySelector('[ng-version]')){ t.push('Angular'); }
+      if(document.querySelector('[data-v-app]') || window.__VUE__){ t.push('Vue'); }
+      if(window.jQuery){ t.push('jQuery'); }
+      return t.filter(function(v, i){ return t.indexOf(v) === i; }).slice(0, 6).join(', ');
+    });
+  } catch(e){ return ''; }
+}
+
+// Visit one host (https first, then http), collect status/title/tech/server + a
+// small screenshot thumbnail, and emit a 'web' node under the probed host node.
+async function probeOne(browser, target, io){
+  var schemes = /^https?:\/\//i.test(target) ? [target] : ['https://' + target, 'http://' + target];
+  var page;
+  try { page = await browser.newPage(); } catch(e){ return; }
+  try {
+    var resp = null;
+    for(var s = 0; s < schemes.length; s++){
+      try {
+        resp = await page.goto(schemes[s], { waitUntil: 'domcontentloaded', timeout: 15000 });
+        if(resp){ break; }
+      } catch(e){ resp = null; }
+    }
+    if(!resp){ return; }                       // dead / unreachable host, skip quietly
+    var status = resp.status();
+    var finalUrl = page.url();
+    var title = '';
+    try { title = await page.title(); } catch(e){}
+    var headers = resp.headers() || {};
+    var ipStr = '';
+    try { ipStr = (resp.remoteAddress && resp.remoteAddress.ip) || ''; } catch(e){}
+    var tech = await sniffTech(page);
+    var shot = '';
+    try {
+      var buf = await page.screenshot({ type: 'jpeg', quality: 45 });
+      shot = 'data:image/jpeg;base64,' + buf.toString('base64');
+    } catch(e){}
+    var meta = { url: finalUrl, status: String(status) };
+    if(headers['server']){ meta.server = String(headers['server']).slice(0, 120); }
+    if(headers['x-powered-by']){ meta['x-powered-by'] = String(headers['x-powered-by']).slice(0, 120); }
+    if(ipStr){ meta.ip = ipStr; }
+    if(tech){ meta.tech = tech; }
+    if(title){ meta.title = String(title).slice(0, 200); }
+    if(shot){ meta.screenshot = shot; }
+    var label = status + (title ? ' · ' + String(title).slice(0, 60) : '');
+    io.emit('add_node', { id: finalUrl, parent: target, node_type: 'web', label: label, meta: meta });
+    if(ipStr){ io.emit('add_node', { id: ipStr, parent: finalUrl, node_type: 'server' }); }
+  } catch(e){
+    console.log('http_probe error on ' + target + ': ' + e.message);
+  } finally {
+    try { await page.close(); } catch(e){}
+  }
+}
+
+// Probe a batch of hosts with a single headless browser instance.
+async function httpProbe(query_object, io){
+  var targets = (query_object && query_object.targets) || [];
+  var MAX_TARGETS = 150;
+  if(targets.length > MAX_TARGETS){
+    io.emit('server_message', 'HTTP probe capped at ' + MAX_TARGETS + ' hosts (selected ' + targets.length + ')');
+    targets = targets.slice(0, MAX_TARGETS);
+  }
+  if(!targets.length){ return; }
+  var puppet_options = ['--ignore-certificate-errors', '--disable-blink-features=AutomationControlled', '--no-sandbox'];
+  var browser;
+  try {
+    browser = await puppeteer.launch({
+      headless: true,
+      acceptInsecureCerts: true,
+      ignoreDefaultArgs: ['--enable-automation'],
+      defaultViewport: { width: 1024, height: 640 },
+      args: puppet_options
+    });
+  } catch(e){ io.emit('server_message', 'HTTP probe: could not launch browser: ' + e.message); return; }
+  for(var i = 0; i < targets.length; i++){
+    var target = String(targets[i]).trim();
+    if(!target){ continue; }
+    await probeOne(browser, target, io);
+  }
+  try { await browser.close(); } catch(e){}
+  io.emit('server_message', 'HTTP probe complete (' + targets.length + ' hosts)');
+}
+
+// Simple GET that returns the (size-capped) response body. cb(err, status, body, headers).
+// Does not follow redirects on purpose -- we want to inspect the direct response.
+function httpGetBody(urlStr, cb){
+  var mod = urlStr.indexOf('https:') === 0 ? https_resolver : http_resolver;
+  var finished = false;
+  function done(e, s, b, h){ if(finished){ return; } finished = true; cb(e, s, b, h); }
+  try {
+    var req = mod.get(urlStr, function(resp){
+      var data = '';
+      resp.on('data', function(c){ if(data.length < 200000){ data += c; } });
+      resp.on('end', function(){ done(null, resp.statusCode, data, resp.headers || {}); });
+    });
+    req.on('error', function(e){ done(e); });
+    req.setTimeout(12000, function(){ req.destroy(new Error('timeout')); });
+  } catch(e){ done(e); }
+}
+
+// "Unclaimed resource" fingerprints for common takeover-prone services. A hit needs
+// the body signature; a matching CNAME raises confidence to high. Curated from the
+// well-known can-i-take-over-xyz signatures.
+var TAKEOVER_FPS = [
+  { service: 'GitHub Pages', cname: ['github.io'], body: ["There isn't a GitHub Pages site here", "For root URLs (like http://example.com/) you must provide an index.html file"] },
+  { service: 'AWS S3', cname: ['s3.amazonaws.com', 's3-website', 's3.'], body: ['NoSuchBucket', 'The specified bucket does not exist'] },
+  { service: 'Heroku', cname: ['herokudns.com', 'herokuapp.com', 'herokussl.com'], body: ['No such app', "There's nothing here, yet."] },
+  { service: 'Microsoft Azure', cname: ['azurewebsites.net', 'cloudapp.net', 'cloudapp.azure.com', 'trafficmanager.net', 'blob.core.windows.net', 'azureedge.net', 'azurefd.net'], body: ['404 Web Site not found', 'The resource you are looking for has been removed'] },
+  { service: 'Fastly', cname: ['fastly.net'], body: ['Fastly error: unknown domain'] },
+  { service: 'Shopify', cname: ['myshopify.com'], body: ['Sorry, this shop is currently unavailable'] },
+  { service: 'Tumblr', cname: ['domains.tumblr.com'], body: ["Whatever you were looking for doesn't currently exist at this address"] },
+  { service: 'Zendesk', cname: ['zendesk.com'], body: ['Help Center Closed'] },
+  { service: 'Ghost', cname: ['ghost.io'], body: ['The thing you were looking for is no longer here'] },
+  { service: 'Surge.sh', cname: ['surge.sh'], body: ['project not found'] },
+  { service: 'Pantheon', cname: ['pantheonsite.io'], body: ['The gods are wise, but do not know of the site which you seek', '404 error unknown site!'] },
+  { service: 'Bitbucket', cname: ['bitbucket.io'], body: ['Repository not found'] },
+  { service: 'Netlify', cname: ['netlify.app', 'netlify.com'], body: ['Not Found - Request ID'] },
+  { service: 'Read the Docs', cname: ['readthedocs.io'], body: ['unknown to Read the Docs'] },
+  { service: 'WordPress', cname: ['wordpress.com'], body: ['Do you want to register'] },
+  { service: 'Desk', cname: ['desk.com'], body: ['Please try again or try Desk.com free for 14 days'] },
+  { service: 'Cargo', cname: ['cargocollective.com'], body: ['404 Not Found'] }
+];
+
+// Fetch a host and, on a matching "unclaimed" signature, emit a vuln finding node.
+function checkTakeover(host, cnames, io, cb){
+  var schemes = ['https://' + host + '/', 'http://' + host + '/'];
+  function tryScheme(i){
+    if(i >= schemes.length){ cb(false); return; }
+    httpGetBody(schemes[i], function(err, status, body){
+      if(err || body === undefined || body === null){ tryScheme(i + 1); return; }
+      var hitFp = null, cnameHit = false;
+      for(var f = 0; f < TAKEOVER_FPS.length; f++){
+        var fp = TAKEOVER_FPS[f];
+        var bodyMatch = fp.body.some(function(sig){ return body.indexOf(sig) > -1; });
+        if(!bodyMatch){ continue; }
+        var cnameMatch = cnames.some(function(c){ return fp.cname.some(function(suf){ return String(c).toLowerCase().indexOf(suf) > -1; }); });
+        hitFp = fp; cnameHit = cnameMatch;
+        if(cnameMatch){ break; }   // prefer a CNAME-corroborated match
+      }
+      if(hitFp){
+        var cnameStr = cnames.join(', ');
+        io.emit('add_node', { id: 'TAKEOVER? ' + host + ' -> ' + hitFp.service, parent: host, node_type: 'vuln',
+          label: '⚠ Takeover? ' + hitFp.service,
+          meta: { host: host, service: hitFp.service, cname: cnameStr || '(none)', status: String(status),
+                  confidence: cnameHit ? 'high (CNAME + body signature)' : 'medium (body signature only)' } });
+        cb(true);
+      } else {
+        cb(false);
+      }
+    });
+  }
+  tryScheme(0);
+}
+
+// Derive candidate bucket names from a domain or org node (base keyword x suffixes).
+function bucketCandidates(seed){
+  var base = String(seed).toLowerCase().replace(/^https?:\/\//, '').split('/')[0];
+  var labels = base.split('.').filter(Boolean);
+  var core;
+  if(labels.length >= 2 && /^[a-z0-9.-]+\.[a-z]{2,}$/.test(base)){ core = labels[labels.length - 2]; }
+  else { core = base.replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, ''); }
+  var bases = {};
+  if(core){ bases[core] = 1; bases[core.replace(/-/g, '')] = 1; }
+  var suffixes = ['', '-www', '-dev', '-staging', '-prod', '-test', '-backup', '-backups', '-assets',
+                  '-static', '-media', '-images', '-files', '-uploads', '-data', '-logs', '-public',
+                  '-private', '-internal', '-cdn', '-app'];
+  var seen = {}, out = [];
+  Object.keys(bases).forEach(function(b){
+    if(!b){ return; }
+    suffixes.forEach(function(suf){
+      [b + suf, suf ? b + suf.replace('-', '') : null].forEach(function(n){
+        if(n && n.length >= 3 && !seen[n]){ seen[n] = 1; out.push(n); }
+      });
+    });
+  });
+  return out.slice(0, 30);
+}
+
+// Probe one candidate name across S3, GCS, and Azure Blob. cb(true) if anything exists.
+function checkBucket(name, seed, io, cb){
+  var any = false;
+  httpGetBody('https://' + name + '.s3.amazonaws.com/', function(e, s, b){
+    var bb = b || '';
+    if(!e && s){
+      if(s === 200 && bb.indexOf('<ListBucketResult') > -1){
+        any = true;
+        io.emit('add_node', { id: '⚠ PUBLIC S3: https://' + name + '.s3.amazonaws.com/', parent: seed, node_type: 'vuln',
+          label: '⚠ Public S3 bucket: ' + name,
+          meta: { provider: 'AWS S3', bucket: name, access: 'PUBLIC / listable', url: 'https://' + name + '.s3.amazonaws.com/' } });
+      } else if(s === 403 || bb.indexOf('AccessDenied') > -1){
+        any = true;
+        io.emit('add_node', { id: 'S3 (private): https://' + name + '.s3.amazonaws.com/', parent: seed, node_type: 'info',
+          meta: { provider: 'AWS S3', bucket: name, access: 'exists (private)' } });
+      } else if(bb.indexOf('PermanentRedirect') > -1){
+        any = true;
+        io.emit('add_node', { id: 'S3 (region redirect): https://' + name + '.s3.amazonaws.com/', parent: seed, node_type: 'info',
+          meta: { provider: 'AWS S3', bucket: name, access: 'exists (other region)' } });
+      }
+    }
+    httpGetBody('https://storage.googleapis.com/' + name + '/', function(e2, s2){
+      if(!e2 && s2 === 200){
+        any = true;
+        io.emit('add_node', { id: '⚠ PUBLIC GCS: https://storage.googleapis.com/' + name + '/', parent: seed, node_type: 'vuln',
+          label: '⚠ Public GCS bucket: ' + name,
+          meta: { provider: 'Google GCS', bucket: name, access: 'PUBLIC / listable', url: 'https://storage.googleapis.com/' + name + '/' } });
+      } else if(!e2 && s2 === 403){
+        any = true;
+        io.emit('add_node', { id: 'GCS (private): https://storage.googleapis.com/' + name + '/', parent: seed, node_type: 'info',
+          meta: { provider: 'Google GCS', bucket: name, access: 'exists (private)' } });
+      }
+      dns.resolve(name + '.blob.core.windows.net', function(e3){
+        if(!e3){
+          any = true;
+          io.emit('add_node', { id: 'Azure blob: https://' + name + '.blob.core.windows.net/', parent: seed, node_type: 'info',
+            meta: { provider: 'Azure Blob', account: name, access: 'storage account exists' } });
+        }
+        cb(any);
+      });
+    });
+  });
 }
