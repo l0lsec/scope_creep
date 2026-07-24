@@ -20,6 +20,21 @@ Start the server and open [http://localhost:3000](http://localhost:3000) in Chro
 node index.js
 ```
 
+How to Use
+=====
+
+Most modules follow the same pattern: **select one or more nodes, then run a module** (click it in the help menu or press its key binding). Results attach to the selected node as new nodes, so the graph grows as you enumerate. A typical engagement flows top to bottom:
+
+1. **Seed scope** — add root domains or an org with Add Node (a), or import a scope file with Open Scope File (o).
+2. **Establish IP scope** — select an organization node and run **ARIN Org → Netblocks/ASNs** to pull authoritative CIDR ranges; select a host (IP) node and run **ARIN IP → Owning Org/Netblock** for the reverse. ASN Search (A) and Whois (w) help here too.
+3. **Expand DNS** — Subdomain Lookup (s), CRT.SH (S), Wayback URLs (K), and Bruteforce Subdomains (b) to find hosts; Reverse DNS (r/R) and MX/NS/TXT (m/n/t) to resolve them.
+4. **Sweep & scan** — turn Safety Mode **off**, then IP DNS / Ping Sweep (i/I) and Port Scan (p/P) across the CIDR nodes ARIN gave you.
+5. **Triage the attack surface** — HTTP Probe + Screenshot (J) on live hosts, then CVE Lookup on the resulting web-service nodes.
+6. **Hunt exposure** — Dork Generator (/) plus the Google/GitHub dork searches, Subdomain Takeover Check (,), Cloud Bucket Enumeration (.), and Flare Leaked Credentials (k) / Breach Events (j).
+7. **Deliver** — Generate Recon Report (📄) for a findings-first HTML report, and Export Findings + CVEs (CSV) for tracking.
+
+Select multiple nodes (click their rows in the List View, or use Find Node (f) with a regex) to run a module against many targets at once. Your work auto-saves as you go — see Session Persistence below.
+
 Session Persistence & Recovery
 =====
 

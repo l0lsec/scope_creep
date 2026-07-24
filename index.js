@@ -1635,9 +1635,11 @@ io.on('connection', function(socket){
     var name = query_object && query_object.node_id;
     if(!name){ return; }
     io.emit('server_message', 'ARIN: searching orgs for "' + name + '"...');
-    arinGet('/rest/orgs;name=' + encodeURIComponent(name), function(err, status, json){
-      if(err || !json){ io.emit('server_message', 'ARIN org search failed for "' + name + '"'); return; }
-      var orgs = asArray(json.orgs && json.orgs.orgRef);
+    // ARIN's name search is a prefix match and 404s on no match, so append a
+    // trailing wildcard (raw, not URL-encoded) and treat an empty result as "none".
+    arinGet('/rest/orgs;name=' + encodeURIComponent(name) + '*', function(err, status, json){
+      if(err){ io.emit('server_message', 'ARIN org search failed for "' + name + '"'); return; }
+      var orgs = json ? asArray(json.orgs && json.orgs.orgRef) : [];
       if(!orgs.length){ io.emit('server_message', 'ARIN: no orgs matched "' + name + '"'); return; }
       if(orgs.length > 12){ io.emit('server_message', 'ARIN: ' + orgs.length + ' orgs matched; expanding the first 12'); orgs = orgs.slice(0, 12); }
       var i = 0;
