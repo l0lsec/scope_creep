@@ -147,6 +147,12 @@ Opens a tab for every subdomain node in the graph.
 ### ASN search(A):
 Finds IP ranges belonging to an organization via the [asnlookup.com](http://asnlookup.com/) API. Forward lookups by organization name only.
 
+### ARIN Org → Netblocks/ASNs:
+Searches ARIN's [Whois-RWS](https://whois.arin.net/) registry by the selected node's name and pulls the netblocks and ASNs registered to each matching org — the authoritative way to turn a target org name into IP scope. Each match becomes an organization node; its netblocks come back as **CIDR nodes** (ready to ping sweep or port scan) and its ASNs as info nodes. Menu-triggered. ARIN covers North America; other regions are registered with RIPE/APNIC/LACNIC/AFRINIC.
+
+### ARIN IP → Owning Org/Netblock:
+For each selected host (IP) node, looks up ARIN for the owning organization and the parent netblock(s), attaching an organization node and the covering **CIDR node(s)** — the reverse of the org lookup, and a quick way to learn who an IP belongs to and expand to its whole allocation. Menu-triggered.
+
 ### DoxNS Lookup(x):
 Proprietary database (not in the public repo).
 

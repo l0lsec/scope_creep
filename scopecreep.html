@@ -1324,6 +1324,26 @@
             $("#reverse_ip").trigger("blur")
           })
 
+          // ARIN org lookup: search ARIN by the selected node's name and pull its
+          // registered netblocks (as CIDR nodes) and ASNs.
+          $("#arin_org").click(function(){
+            var sel = $(".selected")[0]
+            if(!sel){ alert("ARIN Org: select an organization node (its name is searched in ARIN)"); return }
+            socket.emit('arin_org', {node_id: sel.id})
+            $("#arin_org").trigger("blur")
+          })
+
+          // ARIN IP lookup: for each selected host (IP) node, find the owning org
+          // and parent netblock.
+          $("#arin_ip").click(function(){
+            var picked = 0
+            $(".selected").each(function(){
+              if(mygraph.getNode(this.id).data == 'server'){ socket.emit('arin_ip', {node_id: this.id}); picked++ }
+            })
+            if(!picked){ alert("ARIN IP: select one or more host (IP) nodes") }
+            $("#arin_ip").trigger("blur")
+          })
+
           // CVE lookup: send the tech/version fingerprints of the selected web nodes
           // to the server for an NVD search. Only the 3 relevant meta fields are sent
           // (never the screenshot data URI).
@@ -2815,6 +2835,8 @@
     <tr class="control benign" id="convert_to_cidr"><td>Convert IP Range to CIDR Node</td><td>(C)</td></tr>
     <tr class="control benign" id="view_website"><td>View Website in New Tab</td><td>(v)(V)</td></tr>
     <tr class="control benign" id="asn_search"><td>ASN Search</td><td>(A)</td></tr>
+    <tr class="control ratelimit" id="arin_org"><td>ARIN Org &rarr; Netblocks/ASNs (scoping)</td><td></td></tr>
+    <tr class="control ratelimit" id="arin_ip"><td>ARIN IP &rarr; Owning Org/Netblock (host node)</td><td></td></tr>
     <tr class="control benign" id="dox_ns"><td>DoxNS Lookup</td><td>(x)</td></tr>
     <tr class="control benign" id="reverse_dox_ns"><td>Reverse DoxNS Lookup</td><td>(X)</td></tr>
     <tr class="control ratelimit" id="ip_query"><td>IP DNS Query/Ping Sweep CIDR</td><td>(i)(I)</td></tr>

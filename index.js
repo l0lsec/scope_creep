@@ -1627,6 +1627,61 @@ io.on('connection', function(socket){
     next();
   });
 
+  // ARIN Org lookup: search ARIN's registry by org name and pull the netblocks and
+  // ASNs registered to each match. The netblocks come back as CIDR nodes that drop
+  // straight into the ping-sweep / port-scan / reverse-DNS pipeline. (ARIN covers
+  // North America; for other regions an RDAP-based lookup would be the extension.)
+  socket.on('arin_org', function(query_object){
+    var name = query_object && query_object.node_id;
+    if(!name){ return; }
+    io.emit('server_message', 'ARIN: searching orgs for "' + name + '"...');
+    arinGet('/rest/orgs;name=' + encodeURIComponent(name), function(err, status, json){
+      if(err || !json){ io.emit('server_message', 'ARIN org search failed for "' + name + '"'); return; }
+      var orgs = asArray(json.orgs && json.orgs.orgRef);
+      if(!orgs.length){ io.emit('server_message', 'ARIN: no orgs matched "' + name + '"'); return; }
+      if(orgs.length > 12){ io.emit('server_message', 'ARIN: ' + orgs.length + ' orgs matched; expanding the first 12'); orgs = orgs.slice(0, 12); }
+      var i = 0;
+      function nextOrg(){
+        if(i >= orgs.length){ io.emit('server_message', 'ARIN org expansion complete (' + orgs.length + ' org(s))'); return; }
+        var o = orgs[i++];
+        var handle = o['@handle'];
+        if(!handle){ nextOrg(); return; }
+        var orgNodeId = (o['@name'] || handle) + ' (' + handle + ')';
+        io.emit('add_node', { id: orgNodeId, parent: name, node_type: 'organization', meta: { arin_handle: handle, source: 'ARIN' } });
+        arinExpandOrg(handle, orgNodeId, io, function(){ setTimeout(nextOrg, 500); });
+      }
+      nextOrg();
+    });
+  });
+
+  // ARIN IP lookup: given a host (IP) node, find the owning org and the parent
+  // netblock(s). Emits an organization node and CIDR node(s) for the allocation.
+  socket.on('arin_ip', function(query_object){
+    var ip = query_object && query_object.node_id;
+    if(!ip){ return; }
+    io.emit('server_message', 'ARIN: looking up ' + ip + '...');
+    arinGet('/rest/ip/' + encodeURIComponent(ip), function(err, status, json){
+      if(err || !json || !json.net){ io.emit('server_message', 'ARIN: no record for ' + ip); return; }
+      var net = json.net;
+      var ref = net.orgRef || net.customerRef || {};
+      var orgName = ref['@name'] || (ref['$'] || '');
+      var orgHandle = ref['@handle'] || '';
+      var orgNodeId = orgName ? (orgName + (orgHandle ? ' (' + orgHandle + ')' : '')) : '';
+      if(orgNodeId){ io.emit('add_node', { id: orgNodeId, parent: ip, node_type: 'organization', meta: { arin_handle: orgHandle, source: 'ARIN' } }); }
+      var parent = orgNodeId || ip;
+      var netName = (net.name && net.name['$']) || '';
+      asArray(net.netBlocks && net.netBlocks.netBlock).forEach(function(b){
+        var startA = b.startAddress && b.startAddress['$'];
+        var cidrLen = b.cidrLength && b.cidrLength['$'];
+        if(startA && cidrLen){
+          io.emit('add_node', { id: startA + '/' + cidrLen, parent: parent, node_type: 'cidr',
+            meta: { net: netName, handle: (net.handle && net.handle['$']) || '', source: 'ARIN' } });
+        }
+      });
+      io.emit('server_message', 'ARIN: ' + ip + ' -> ' + (orgName || 'unknown') + (netName ? ' / ' + netName : ''));
+    });
+  });
+
 });
 
 http.listen(3000, function(){
@@ -2039,4 +2094,93 @@ function nvdLookup(keyword, apiKey, cb){
   req.on('error', function(){ finish([]); });
   req.setTimeout(20000, function(){ req.destroy(); finish([]); });
   req.end();
+}
+
+// --- ARIN Whois-RWS helpers ---------------------------------------------------
+// RWS returns JSON when asked; its shapes are inconsistent (single object vs array,
+// search results use @attributes while point queries wrap values as {"$": value}),
+// so parsing leans on asArray() and defensive property access.
+
+// GET a RWS path and hand back parsed JSON. cb(err, statusCode, jsonOrNull).
+function arinGet(path, cb){
+  var done = false;
+  function fin(e, s, j){ if(done){ return; } done = true; cb(e, s, j); }
+  var options = { host: 'whois.arin.net', path: path, method: 'GET', headers: { 'Accept': 'application/json', 'User-Agent': 'scope_creep' } };
+  var req = https_resolver.request(options, function(resp){
+    var data = '';
+    resp.on('data', function(c){ if(data.length < 2000000){ data += c; } });
+    resp.on('end', function(){ var j = null; try { j = JSON.parse(data); } catch(e){} fin(null, resp.statusCode, j); });
+  });
+  req.on('error', function(e){ fin(e); });
+  req.setTimeout(20000, function(){ req.destroy(); fin(new Error('timeout')); });
+  req.end();
+}
+
+// Normalize RWS's "maybe a single object, maybe an array, maybe missing" collections.
+function asArray(x){ if(x == null){ return []; } return Array.isArray(x) ? x : [x]; }
+
+function ipToInt(ip){
+  var p = String(ip).split('.');
+  if(p.length !== 4){ return null; }
+  var n = 0;
+  for(var i = 0; i < 4; i++){
+    var o = parseInt(p[i], 10);
+    if(isNaN(o) || o < 0 || o > 255){ return null; }
+    n = (n * 256) + o;
+  }
+  return n;
+}
+
+function intToIp(n){
+  return Math.floor(n / 16777216) % 256 + '.' + Math.floor(n / 65536) % 256 + '.' +
+         Math.floor(n / 256) % 256 + '.' + n % 256;
+}
+
+// Cover an inclusive [start, end] integer IP range with the minimal set of aligned
+// CIDR blocks. Plain arithmetic (not bitwise) so 32-bit values stay unsigned.
+function rangeToCidrs(start, end){
+  var out = [];
+  if(start == null || end == null || start > end){ return out; }
+  while(start <= end){
+    var maxByAlign = 1, s = start;
+    if(start === 0){ maxByAlign = 4294967296; }
+    else { while(s % 2 === 0 && maxByAlign < 4294967296){ maxByAlign *= 2; s /= 2; } }
+    var remaining = end - start + 1;
+    var size = maxByAlign;
+    while(size > remaining){ size /= 2; }
+    out.push(intToIp(start) + '/' + (32 - Math.round(Math.log2(size))));
+    start += size;
+    if(out.length > 512){ break; }   // safety cap on absurdly large ranges
+  }
+  return out;
+}
+
+// Pull an ARIN org's netblocks (-> CIDR nodes) and ASNs (-> info nodes).
+function arinExpandOrg(handle, orgNodeId, io, done){
+  arinGet('/rest/org/' + encodeURIComponent(handle) + '/nets', function(e, s, json){
+    var nets = json ? asArray(json.nets && json.nets.netRef) : [];
+    nets.slice(0, 300).forEach(function(nref){
+      var start = nref['@startAddress'], end = nref['@endAddress'];
+      var netName = nref['@name'] || nref['@handle'] || '';
+      var si = ipToInt(start), ei = ipToInt(end);
+      if(si !== null && ei !== null){
+        rangeToCidrs(si, ei).forEach(function(cidr){
+          io.emit('add_node', { id: cidr, parent: orgNodeId, node_type: 'cidr',
+            meta: { net: netName, range: start + ' - ' + end, source: 'ARIN' } });
+        });
+      }
+    });
+    setTimeout(function(){
+      arinGet('/rest/org/' + encodeURIComponent(handle) + '/asns', function(e2, s2, json2){
+        var asns = json2 ? asArray(json2.asns && json2.asns.asnRef) : [];
+        asns.slice(0, 100).forEach(function(a){
+          var ah = a['@handle'] || a['$'] || '';
+          var an = a['@name'] || '';
+          if(ah){ io.emit('add_node', { id: 'ASN: ' + ah + (an ? ' (' + an + ')' : ''), parent: orgNodeId, node_type: 'info',
+            meta: { asn: ah, name: an, source: 'ARIN' } }); }
+        });
+        done();
+      });
+    }, 400);
+  });
 }
