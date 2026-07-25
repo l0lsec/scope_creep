@@ -648,7 +648,9 @@ io.on('connection', function(socket){
        console.log("Error: " + err.message);
     });
 
-    https_resolver.get('https://otx.alienvault.com/api/v1/indicators/domain/' + query + '/passive_dns',  (resp) => {
+    https_resolver.get('https://otx.alienvault.com/api/v1/indicators/domain/' + query + '/passive_dns',
+      { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/71.0.3578.98 Safari/537.36' } },
+      (resp) => {
       let data = '';
 
       resp.on('data', (chunk) => {
@@ -656,11 +658,16 @@ io.on('connection', function(socket){
       });
 
       resp.on('end', () => {
+        if(resp.statusCode != 200){
+          console.log("AlienVault OTX returned status " + resp.statusCode + " for " + query)
+          return
+        }
         var results
         try {
           results = JSON.parse(data).passive_dns
         } catch(err) {
-          console.log("Error parsing AlienVault OTX response: " + err.message)
+          // Non-JSON body (HTML block/challenge page) despite a 200 — log a short preview, not the raw parse error.
+          console.log("AlienVault OTX returned non-JSON for " + query + ": " + data.slice(0, 80).replace(/\s+/g, ' '))
           return
         }
         if(!Array.isArray(results)){ return }
@@ -786,39 +793,24 @@ io.on('connection', function(socket){
     });
   });
 
+  // ASN Search -> ARIN Whois-RWS. asnlookup.com's scraping API is dead (301 -> HTTPS
+  // behind a Cloudflare challenge), so route by what the selected node actually is:
+  //   ASN info node ("ASN: AS36411 (GEN-AS2)") -> ASN -> owning org -> netblocks/ASNs
+  //   host/server node (an IP)                 -> owning org + parent netblock(s)
+  //   anything else (an org name)              -> org-name search -> netblocks/ASNs
+  // Every path goes through arinGet, which parses JSON defensively, so an HTML or
+  // redirect body no longer reaches JSON.parse and crashes the process.
   socket.on('asn_search', function(query_object){
-    var api_call = 'http://asnlookup.com/api/lookup?org=' + encodeURIComponent(query_object.node_id)
-//    if(query_object.node_type == "server"){
-//      api_call = 'http://10.0.50.105:10120/ip_to_asn?q=' + query_object.node_id
-//    }else if(query_object.node_type == "info"){
-//      api_call = 'http://10.0.50.105:10120/asn_to_org?q=' + query_object.node_id.replace(/ASN:/,'')
-//    }else{
-//      api_call = 'http://10.0.50.105:10120/org_to_asn?q=' + query_object.node_id
-//    }
-    http_resolver.get(api_call,  (resp) => {
-      let data = '';
-
-      resp.on('data', (chunk) => {
-        data += chunk;
-      });
-
-      resp.on('end', () => {
-        results = JSON.parse(data)
-        for(result in results){
-//          new_node = JSON.parse('{"id": "'+ results[result].org + '", "parent": "' + query_object.node_id + '", "node_type": "organization"}')
-//          io.emit('add_node', new_node)
-//          new_node = JSON.parse('{"id": "ASN:'+ results[result].asn + '", "parent": "' + results[result].org + '", "node_type": "info"}')
-//          io.emit('add_node', new_node)
-          new_node = JSON.parse('{"id": "' + results[result] + '", "parent": "' + query_object.node_id + '", "node_type": "cidr"}')
-          io.emit('add_node', new_node)
-//          new_node = JSON.parse('{"id": "Country:'+ results[result].country + '", "parent": "' + results[result].org + '", "node_type": "info"}')
-//          io.emit('add_node', new_node)
-        }
-      });
-
-    }).on("error", (err) => {
-       console.log("Error: " + err.message);
-    });
+    var nodeId = query_object && query_object.node_id;
+    if(!nodeId){ return; }
+    var asnMatch = String(nodeId).match(/^(?:ASN:\s*)?AS(\d+)/i);
+    if(asnMatch){
+      arinAsnLookup(nodeId, asnMatch[1], io);
+    } else if(query_object.node_type === 'server'){
+      arinIpLookup(nodeId, io);
+    } else {
+      arinOrgSearch(nodeId, io);
+    }
   });
 
   socket.on('dox_ns', function(query){
@@ -1633,55 +1625,14 @@ io.on('connection', function(socket){
   // North America; for other regions an RDAP-based lookup would be the extension.)
   socket.on('arin_org', function(query_object){
     var name = query_object && query_object.node_id;
-    if(!name){ return; }
-    io.emit('server_message', 'ARIN: searching orgs for "' + name + '"...');
-    // ARIN's name search is a prefix match and 404s on no match, so append a
-    // trailing wildcard (raw, not URL-encoded) and treat an empty result as "none".
-    arinGet('/rest/orgs;name=' + encodeURIComponent(name) + '*', function(err, status, json){
-      if(err){ io.emit('server_message', 'ARIN org search failed for "' + name + '"'); return; }
-      var orgs = json ? asArray(json.orgs && json.orgs.orgRef) : [];
-      if(!orgs.length){ io.emit('server_message', 'ARIN: no orgs matched "' + name + '"'); return; }
-      if(orgs.length > 12){ io.emit('server_message', 'ARIN: ' + orgs.length + ' orgs matched; expanding the first 12'); orgs = orgs.slice(0, 12); }
-      var i = 0;
-      function nextOrg(){
-        if(i >= orgs.length){ io.emit('server_message', 'ARIN org expansion complete (' + orgs.length + ' org(s))'); return; }
-        var o = orgs[i++];
-        var handle = o['@handle'];
-        if(!handle){ nextOrg(); return; }
-        var orgNodeId = (o['@name'] || handle) + ' (' + handle + ')';
-        io.emit('add_node', { id: orgNodeId, parent: name, node_type: 'organization', meta: { arin_handle: handle, source: 'ARIN' } });
-        arinExpandOrg(handle, orgNodeId, io, function(){ setTimeout(nextOrg, 500); });
-      }
-      nextOrg();
-    });
+    if(name){ arinOrgSearch(name, io); }
   });
 
   // ARIN IP lookup: given a host (IP) node, find the owning org and the parent
   // netblock(s). Emits an organization node and CIDR node(s) for the allocation.
   socket.on('arin_ip', function(query_object){
     var ip = query_object && query_object.node_id;
-    if(!ip){ return; }
-    io.emit('server_message', 'ARIN: looking up ' + ip + '...');
-    arinGet('/rest/ip/' + encodeURIComponent(ip), function(err, status, json){
-      if(err || !json || !json.net){ io.emit('server_message', 'ARIN: no record for ' + ip); return; }
-      var net = json.net;
-      var ref = net.orgRef || net.customerRef || {};
-      var orgName = ref['@name'] || (ref['$'] || '');
-      var orgHandle = ref['@handle'] || '';
-      var orgNodeId = orgName ? (orgName + (orgHandle ? ' (' + orgHandle + ')' : '')) : '';
-      if(orgNodeId){ io.emit('add_node', { id: orgNodeId, parent: ip, node_type: 'organization', meta: { arin_handle: orgHandle, source: 'ARIN' } }); }
-      var parent = orgNodeId || ip;
-      var netName = (net.name && net.name['$']) || '';
-      asArray(net.netBlocks && net.netBlocks.netBlock).forEach(function(b){
-        var startA = b.startAddress && b.startAddress['$'];
-        var cidrLen = b.cidrLength && b.cidrLength['$'];
-        if(startA && cidrLen){
-          io.emit('add_node', { id: startA + '/' + cidrLen, parent: parent, node_type: 'cidr',
-            meta: { net: netName, handle: (net.handle && net.handle['$']) || '', source: 'ARIN' } });
-        }
-      });
-      io.emit('server_message', 'ARIN: ' + ip + ' -> ' + (orgName || 'unknown') + (netName ? ' / ' + netName : ''));
-    });
+    if(ip){ arinIpLookup(ip, io); }
   });
 
 });
@@ -2184,5 +2135,74 @@ function arinExpandOrg(handle, orgNodeId, io, done){
         done();
       });
     }, 400);
+  });
+}
+
+// Org-name search via ARIN: match orgs by name (prefix + wildcard) and expand each
+// one's netblocks/ASNs. Shared by the "ARIN Org" button and ASN Search's org path.
+function arinOrgSearch(name, io){
+  io.emit('server_message', 'ARIN: searching orgs for "' + name + '"...');
+  // ARIN's name search is a prefix match and 404s on no match, so append a
+  // trailing wildcard (raw, not URL-encoded) and treat an empty result as "none".
+  arinGet('/rest/orgs;name=' + encodeURIComponent(name) + '*', function(err, status, json){
+    if(err){ io.emit('server_message', 'ARIN org search failed for "' + name + '"'); return; }
+    var orgs = json ? asArray(json.orgs && json.orgs.orgRef) : [];
+    if(!orgs.length){ io.emit('server_message', 'ARIN: no orgs matched "' + name + '"'); return; }
+    if(orgs.length > 12){ io.emit('server_message', 'ARIN: ' + orgs.length + ' orgs matched; expanding the first 12'); orgs = orgs.slice(0, 12); }
+    var i = 0;
+    function nextOrg(){
+      if(i >= orgs.length){ io.emit('server_message', 'ARIN org expansion complete (' + orgs.length + ' org(s))'); return; }
+      var o = orgs[i++];
+      var handle = o['@handle'];
+      if(!handle){ nextOrg(); return; }
+      var orgNodeId = (o['@name'] || handle) + ' (' + handle + ')';
+      io.emit('add_node', { id: orgNodeId, parent: name, node_type: 'organization', meta: { arin_handle: handle, source: 'ARIN' } });
+      arinExpandOrg(handle, orgNodeId, io, function(){ setTimeout(nextOrg, 500); });
+    }
+    nextOrg();
+  });
+}
+
+// IP lookup via ARIN: given a host (IP), find the owning org and the parent
+// netblock(s). Shared by the "ARIN IP" button and ASN Search's host path.
+function arinIpLookup(ip, io){
+  io.emit('server_message', 'ARIN: looking up ' + ip + '...');
+  arinGet('/rest/ip/' + encodeURIComponent(ip), function(err, status, json){
+    if(err || !json || !json.net){ io.emit('server_message', 'ARIN: no record for ' + ip); return; }
+    var net = json.net;
+    var ref = net.orgRef || net.customerRef || {};
+    var orgName = ref['@name'] || (ref['$'] || '');
+    var orgHandle = ref['@handle'] || '';
+    var orgNodeId = orgName ? (orgName + (orgHandle ? ' (' + orgHandle + ')' : '')) : '';
+    if(orgNodeId){ io.emit('add_node', { id: orgNodeId, parent: ip, node_type: 'organization', meta: { arin_handle: orgHandle, source: 'ARIN' } }); }
+    var parent = orgNodeId || ip;
+    var netName = (net.name && net.name['$']) || '';
+    asArray(net.netBlocks && net.netBlocks.netBlock).forEach(function(b){
+      var startA = b.startAddress && b.startAddress['$'];
+      var cidrLen = b.cidrLength && b.cidrLength['$'];
+      if(startA && cidrLen){
+        io.emit('add_node', { id: startA + '/' + cidrLen, parent: parent, node_type: 'cidr',
+          meta: { net: netName, handle: (net.handle && net.handle['$']) || '', source: 'ARIN' } });
+      }
+    });
+    io.emit('server_message', 'ARIN: ' + ip + ' -> ' + (orgName || 'unknown') + (netName ? ' / ' + netName : ''));
+  });
+}
+
+// ASN lookup via ARIN: resolve an ASN to its owning org, add that org under the
+// ASN node, then expand the org's netblocks/ASNs. Powers ASN Search on an ASN node.
+function arinAsnLookup(nodeId, asnNum, io){
+  io.emit('server_message', 'ARIN: looking up AS' + asnNum + '...');
+  arinGet('/rest/asn/' + encodeURIComponent(asnNum), function(err, status, json){
+    var ref = json && json.asn && json.asn.orgRef;
+    if(err || !ref){ io.emit('server_message', 'ARIN: no org found for AS' + asnNum); return; }
+    var orgName = ref['@name'] || '';
+    var orgHandle = ref['@handle'] || '';
+    if(!orgHandle){ io.emit('server_message', 'ARIN: AS' + asnNum + ' has no org handle'); return; }
+    var orgNodeId = (orgName || orgHandle) + ' (' + orgHandle + ')';
+    io.emit('add_node', { id: orgNodeId, parent: nodeId, node_type: 'organization', meta: { arin_handle: orgHandle, source: 'ARIN' } });
+    arinExpandOrg(orgHandle, orgNodeId, io, function(){
+      io.emit('server_message', 'ARIN: AS' + asnNum + ' -> ' + (orgName || orgHandle) + ' expanded');
+    });
   });
 }
